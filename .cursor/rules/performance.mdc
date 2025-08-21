@@ -1,0 +1,364 @@
+---
+globs: *.py
+description: 性能优化和内存管理规范
+---
+
+# 性能优化规范
+
+## NumPy优化策略
+
+### 向量化操作
+```python
+# ✅ 推荐：使用NumPy向量化操作
+def convert_points_vectorized(points: np.ndarray, voxel_size: int) -> np.ndarray:
+    """高效的点云到体素索引转换"""
+    # 一次性计算所有点的体素索引
+    min_coords = np.min(points, axis=0)
+    max_coords = np.max(points, axis=0)
+    
+    # 向量化的坐标标准化
+    normalized = (points - min_coords) / (max_coords - min_coords)
+    voxel_indices = (normalized * (voxel_size - 1)).astype(np.int32)
+    
+    return voxel_indices
+
+# ❌ 避免：循环处理每个点
+def convert_points_slow(points: np.ndarray, voxel_size: int) -> np.ndarray:
+    """低效的逐点处理"""
+    voxel_indices = []
+    for point in points:
+        # 逐点计算...
+        pass
+    return np.array(voxel_indices)
+```
+
+### 内存预分配
+```python
+def create_voxel_grid_efficient(voxel_indices: np.ndarray, voxel_size: int) -> np.ndarray:
+    """高效的体素网格创建"""
+    # 预分配内存
+    voxel_grid = np.zeros((voxel_size, voxel_size, voxel_size), dtype=np.bool_)
+    
+    # 使用高级索引一次性设置
+    valid_indices = np.all(
+        (voxel_indices >= 0) & (voxel_indices < voxel_size), axis=1
+    )
+    valid_voxel_indices = voxel_indices[valid_indices]
+    
+    if len(valid_voxel_indices) > 0:
+        voxel_grid[
+            valid_voxel_indices[:, 0],
+            valid_voxel_indices[:, 1], 
+            valid_voxel_indices[:, 2]
+        ] = True
+    
+    return voxel_grid
+```
+
+### 数据类型优化
+```python
+# 根据数据范围选择合适的数据类型
+def optimize_data_types(point_cloud: np.ndarray) -> np.ndarray:
+    """优化点云数据类型"""
+    # 对于坐标数据，float32通常足够
+    if point_cloud.dtype == np.float64:
+        point_cloud = point_cloud.astype(np.float32)
+    
+    # 对于索引数据，使用最小的整数类型
+    max_coord = np.max(np.abs(point_cloud))
+    if max_coord < 32767:
+        return point_cloud.astype(np.int16)  # 节省内存
+    else:
+        return point_cloud.astype(np.int32)
+```
+
+## 大规模数据处理
+
+### 分批处理策略
+```python
+class BatchProcessor:
+    """大规模点云数据的分批处理器"""
+    
+    def __init__(self, batch_size: int = 10000):
+        self.batch_size = batch_size
+    
+    def process_large_pointcloud(self, point_cloud: np.ndarray, 
+                                converter: PointCloudToVoxel) -> np.ndarray:
+        """分批处理大规模点云"""
+        if len(point_cloud) <= self.batch_size:
+            return converter.convert(point_cloud)
+        
+        # 初始化累积体素网格
+        accumulated_grid = None
+        
+        for i in range(0, len(point_cloud), self.batch_size):
+            batch = point_cloud[i:i + self.batch_size]
+            batch_grid = converter.convert(batch)
+            
+            if accumulated_grid is None:
+                accumulated_grid = batch_grid
+            else:
+                # 合并体素网格（根据方法选择合并策略）
+                accumulated_grid = self._merge_grids(accumulated_grid, batch_grid)
+        
+        return accumulated_grid
+    
+    def _merge_grids(self, grid1: np.ndarray, grid2: np.ndarray) -> np.ndarray:
+        """合并两个体素网格"""
+        if grid1.dtype == np.bool_:
+            return grid1 | grid2  # 占有网格使用逻辑或
+        else:
+            return grid1 + grid2  # 密度网格使用加法
+```
+
+### 内存映射文件
+```python
+class MemoryMappedH5Loader:
+    """内存映射的H5文件加载器，适用于超大数据集"""
+    
+    def __init__(self, file_path: str, data_key: str = 'data'):
+        self.file_path = file_path
+        self.data_key = data_key
+        
+        # 使用只读模式打开文件
+        self.h5_file = h5py.File(file_path, 'r')
+        self.dataset = self.h5_file[data_key]
+        
+    def load_chunk(self, start_idx: int, chunk_size: int) -> np.ndarray:
+        """加载数据块，避免加载整个数据集到内存"""
+        end_idx = min(start_idx + chunk_size, len(self.dataset))
+        return self.dataset[start_idx:end_idx]
+    
+    def __del__(self):
+        """确保文件正确关闭"""
+        if hasattr(self, 'h5_file'):
+            self.h5_file.close()
+```
+
+## 并行处理
+
+### 多进程数据加载
+```python
+from multiprocessing import Pool
+from functools import partial
+
+def parallel_voxel_conversion(point_clouds: List[np.ndarray], 
+                            voxel_size: int = 64,
+                            num_workers: int = 4) -> List[np.ndarray]:
+    """并行处理多个点云的体素转换"""
+    
+    # 创建转换器函数
+    convert_func = partial(_convert_single_cloud, voxel_size=voxel_size)
+    
+    # 使用进程池并行处理
+    with Pool(num_workers) as pool:
+        voxel_grids = pool.map(convert_func, point_clouds)
+    
+    return voxel_grids
+
+def _convert_single_cloud(point_cloud: np.ndarray, voxel_size: int) -> np.ndarray:
+    """单个点云转换函数（用于多进程）"""
+    converter = PointCloudToVoxel(voxel_size=voxel_size)
+    return converter.convert(point_cloud)
+```
+
+### 异步I/O
+```python
+import asyncio
+import aiofiles
+
+async def async_save_voxel_grids(voxel_grids: List[np.ndarray], 
+                               output_dir: str) -> None:
+    """异步保存多个体素网格"""
+    
+    tasks = []
+    for i, grid in enumerate(voxel_grids):
+        output_path = os.path.join(output_dir, f"voxel_{i:04d}.tiff")
+        task = asyncio.create_task(_async_save_single_grid(grid, output_path))
+        tasks.append(task)
+    
+    await asyncio.gather(*tasks)
+
+async def _async_save_single_grid(grid: np.ndarray, output_path: str) -> None:
+    """异步保存单个体素网格"""
+    # 将NumPy操作放在线程池中执行
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, tifffile.imwrite, output_path, grid)
+```
+
+## 缓存策略
+
+### LRU缓存
+```python
+from functools import lru_cache
+import hashlib
+
+class CachedVoxelConverter:
+    """带缓存的体素转换器"""
+    
+    def __init__(self, voxel_size: int = 64, cache_size: int = 128):
+        self.voxel_size = voxel_size
+        self.cache_size = cache_size
+        
+    @lru_cache(maxsize=128)
+    def _cached_convert(self, point_cloud_hash: str, 
+                       point_cloud_bytes: bytes) -> np.ndarray:
+        """缓存的转换函数"""
+        # 从bytes重建点云
+        point_cloud = np.frombuffer(point_cloud_bytes, dtype=np.float32)
+        point_cloud = point_cloud.reshape(-1, 3)
+        
+        # 执行转换
+        converter = PointCloudToVoxel(voxel_size=self.voxel_size)
+        return converter.convert(point_cloud)
+    
+    def convert_with_cache(self, point_cloud: np.ndarray) -> np.ndarray:
+        """带缓存的转换方法"""
+        # 计算点云的哈希值用作缓存键
+        point_cloud_bytes = point_cloud.astype(np.float32).tobytes()
+        point_cloud_hash = hashlib.md5(point_cloud_bytes).hexdigest()
+        
+        return self._cached_convert(point_cloud_hash, point_cloud_bytes)
+```
+
+### 磁盘缓存
+```python
+import pickle
+import os
+from pathlib import Path
+
+class DiskCache:
+    """磁盘缓存管理器"""
+    
+    def __init__(self, cache_dir: str = ".cache/voxels"):
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+    
+    def get_cache_path(self, key: str) -> Path:
+        """生成缓存文件路径"""
+        return self.cache_dir / f"{key}.pkl"
+    
+    def save_to_cache(self, key: str, data: np.ndarray) -> None:
+        """保存数据到磁盘缓存"""
+        cache_path = self.get_cache_path(key)
+        with open(cache_path, 'wb') as f:
+            pickle.dump(data, f)
+    
+    def load_from_cache(self, key: str) -> Optional[np.ndarray]:
+        """从磁盘缓存加载数据"""
+        cache_path = self.get_cache_path(key)
+        if cache_path.exists():
+            try:
+                with open(cache_path, 'rb') as f:
+                    return pickle.load(f)
+            except Exception as e:
+                logger.warning(f"缓存加载失败: {e}")
+                return None
+        return None
+    
+    def clear_cache(self) -> None:
+        """清理缓存目录"""
+        for cache_file in self.cache_dir.glob("*.pkl"):
+            cache_file.unlink()
+```
+
+## 性能监控
+
+### 执行时间分析
+```python
+import time
+from contextlib import contextmanager
+
+@contextmanager
+def timer(operation_name: str):
+    """性能计时上下文管理器"""
+    start_time = time.time()
+    try:
+        yield
+    finally:
+        end_time = time.time()
+        duration = end_time - start_time
+        logger.info(f"{operation_name} 执行时间: {duration:.4f}秒")
+
+# 使用示例
+def process_point_cloud(point_cloud: np.ndarray) -> np.ndarray:
+    with timer("点云加载"):
+        # 数据加载操作...
+        pass
+    
+    with timer("体素转换"):
+        converter = PointCloudToVoxel()
+        voxel_grid = converter.convert(point_cloud)
+    
+    return voxel_grid
+```
+
+### 内存使用监控
+```python
+import psutil
+import os
+
+def monitor_memory_usage():
+    """监控当前进程的内存使用"""
+    process = psutil.Process(os.getpid())
+    memory_info = process.memory_info()
+    
+    return {
+        'rss': memory_info.rss / 1024 / 1024,  # MB
+        'vms': memory_info.vms / 1024 / 1024,  # MB
+        'percent': process.memory_percent()
+    }
+
+def log_memory_usage(operation_name: str):
+    """记录操作前后的内存使用"""
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            mem_before = monitor_memory_usage()
+            result = func(*args, **kwargs)
+            mem_after = monitor_memory_usage()
+            
+            mem_diff = mem_after['rss'] - mem_before['rss']
+            logger.info(f"{operation_name} 内存变化: {mem_diff:+.2f}MB")
+            
+            return result
+        return wrapper
+    return decorator
+```
+
+## 数据结构优化
+
+### 稀疏体素表示
+```python
+from scipy.sparse import coo_matrix
+
+class SparseVoxelGrid:
+    """稀疏体素网格，节省内存"""
+    
+    def __init__(self, voxel_size: int):
+        self.voxel_size = voxel_size
+        self.occupied_voxels = set()  # 只存储占用的体素坐标
+    
+    def set_voxel(self, x: int, y: int, z: int, value: bool = True):
+        """设置体素值"""
+        if value:
+            self.occupied_voxels.add((x, y, z))
+        else:
+            self.occupied_voxels.discard((x, y, z))
+    
+    def to_dense(self) -> np.ndarray:
+        """转换为密集数组（仅在需要时）"""
+        dense_grid = np.zeros((self.voxel_size,) * 3, dtype=np.bool_)
+        for x, y, z in self.occupied_voxels:
+            if 0 <= x < self.voxel_size and 0 <= y < self.voxel_size and 0 <= z < self.voxel_size:
+                dense_grid[x, y, z] = True
+        return dense_grid
+    
+    def memory_usage(self) -> float:
+        """估算内存使用量（MB）"""
+        # 每个坐标元组约24字节（3个int64）
+        sparse_size = len(self.occupied_voxels) * 24 / 1024 / 1024
+        dense_size = self.voxel_size ** 3 / 8 / 1024 / 1024  # bool数组
+        return sparse_size, dense_size
+```
+
+通过遵循这些性能优化规范，可以确保Coarse2Fine-PCGen项目在处理大规模点云数据时保持高效率和低内存占用。

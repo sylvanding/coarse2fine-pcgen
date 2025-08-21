@@ -1,0 +1,128 @@
+---
+globs: *.py,*.md
+description: 文档和注释编写规范
+---
+
+# 文档和注释规范
+
+## 模块级文档
+
+每个Python文件开头应包含模块说明：
+
+```python
+"""
+H5点云数据加载器
+
+用于读取HDF5格式的点云数据文件，支持shape为(样本数, 点数, 3)的数据格式。
+提供批量加载、数据验证和统计信息功能。
+"""
+```
+
+## 类文档规范
+
+```python
+class PointCloudToVoxel:
+    """
+    点云到体素转换器
+    
+    将3D点云数据转换为规则的3D体素网格表示。支持多种体素化方法
+    和后处理选项，适用于深度学习模型的输入预处理。
+    
+    Attributes:
+        voxel_size (int): 体素网格的分辨率（每个维度的体素数）
+        method (str): 体素化方法，'occupancy'、'density' 或 'gaussian'
+        bounds (Optional[Tuple]): 点云的边界框
+        
+    Example:
+        >>> converter = PointCloudToVoxel(voxel_size=64, method='occupancy')
+        >>> voxel_grid = converter.convert(point_cloud)
+        >>> converter.save_as_tiff(voxel_grid, "output.tiff")
+    """
+```
+
+## 函数文档规范
+
+```python
+def convert(self, point_cloud: np.ndarray) -> np.ndarray:
+    """
+    将点云转换为体素网格
+    
+    根据指定的体素化方法，将输入的3D点云数据转换为规则的
+    体素网格表示。支持占有网格、密度网格等多种转换模式。
+    
+    Args:
+        point_cloud (np.ndarray): 形状为(N, 3)的点云数据，
+            其中N是点的数量，3代表xyz坐标
+            
+    Returns:
+        np.ndarray: 形状为(voxel_size, voxel_size, voxel_size)的
+            3D体素网格，数据类型根据方法而定
+            
+    Raises:
+        ValueError: 当输入点云格式不正确时
+        RuntimeError: 当体素化过程失败时
+        
+    Example:
+        >>> point_cloud = np.random.rand(1000, 3)
+        >>> voxel_grid = converter.convert(point_cloud)
+        >>> print(voxel_grid.shape)  # (64, 64, 64)
+    """
+```
+
+## 行内注释规范
+
+### 算法解释
+```python
+# 计算点云的边界框，添加padding避免边界点被裁剪
+min_coords = np.min(point_cloud, axis=0)
+max_coords = np.max(point_cloud, axis=0)
+
+# 将点云坐标标准化到[0, voxel_size-1]范围
+normalized_coords = (point_cloud - min_coords) / (max_coords - min_coords)
+voxel_indices = (normalized_coords * (self.voxel_size - 1)).astype(int)
+```
+
+### 重要业务逻辑
+```python
+# 对于密度方法，统计每个体素内的点数
+if self.method == 'density':
+    voxel_grid = np.zeros((self.voxel_size,) * 3, dtype=np.float32)
+    # 使用numpy的高效计数方法
+    unique_indices, counts = np.unique(voxel_indices, axis=0, return_counts=True)
+```
+
+## README.md 文档结构
+
+参考 [readme.md](mdc:readme.md) 的结构：
+
+1. **项目简介**: 一句话描述项目目标
+2. **技术优势**: 解决的核心问题
+3. **项目结构**: 清晰的目录结构说明
+4. **环境设置**: 完整的安装步骤
+5. **快速开始**: 可运行的示例代码
+6. **数据格式**: 输入输出格式说明
+7. **开发计划**: 当前进度和未来规划
+
+## API文档
+
+### 参数说明
+- 明确参数的类型、取值范围、默认值
+- 解释参数对结果的影响
+- 提供合理的默认值建议
+
+### 返回值说明
+- 详细描述返回值的格式和含义
+- 说明不同情况下的返回值变化
+- 提供典型的返回值示例
+
+### 异常说明
+- 列出所有可能抛出的异常
+- 说明异常的触发条件
+- 提供异常处理建议
+
+## 中英文混合规范
+
+- **变量名和函数名**: 使用英文
+- **注释和文档**: 优先使用中文，便于团队理解
+- **日志信息**: 使用中文，便于调试
+- **异常消息**: 使用中文，便于用户理解

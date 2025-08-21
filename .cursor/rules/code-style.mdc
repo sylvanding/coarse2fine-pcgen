@@ -1,0 +1,85 @@
+---
+globs: *.py
+description: Python代码风格和命名规范
+---
+
+# Python 代码风格规范
+
+## 命名约定
+
+### 类命名
+- 使用 PascalCase（帕斯卡命名法）
+- 示例: `PointCloudH5Loader`, `PointCloudToVoxel`, `VoxelGenerator`
+
+### 函数和方法命名
+- 使用 snake_case（下划线命名法）
+- 私有方法以单下划线开头: `_validate_file`, `_compute_bounds`
+- 示例: `load_single_cloud`, `convert_to_voxel`, `save_as_tiff`
+
+### 变量命名
+- 使用 snake_case
+- 常量使用 UPPER_CASE: `DEFAULT_VOXEL_SIZE`, `MAX_POINT_COUNT`
+- 示例: `voxel_size`, `point_cloud`, `file_path`
+
+### 模块和包命名
+- 使用小写字母和下划线
+- 示例: `h5_loader`, `voxel_converter`, `point_refiner`
+
+## 文档字符串
+
+### 类文档
+```python
+class PointCloudH5Loader:
+    """
+    点云H5文件加载器
+    
+    支持读取shape为(样本数, 点数, 3)的点云数据。
+    
+    Attributes:
+        file_path (str): H5文件路径
+        data_key (str): 数据键名
+    """
+```
+
+### 函数文档
+```python
+def convert(self, point_cloud: np.ndarray) -> np.ndarray:
+    """
+    将点云转换为体素网格
+    
+    Args:
+        point_cloud (np.ndarray): 形状为(N, 3)的点云数据
+        
+    Returns:
+        np.ndarray: 3D体素网格
+        
+    Raises:
+        ValueError: 当输入数据格式不正确时
+    """
+```
+
+## 类型注解
+
+- 所有公共函数和方法必须包含类型注解
+- 使用 `typing` 模块的类型: `Optional`, `Tuple`, `Union`, `List`
+- 示例:
+```python
+def load_batch(self, indices: List[int]) -> Tuple[np.ndarray, ...]:
+    """加载批量点云数据"""
+```
+
+## 异常处理
+
+- 使用具体的异常类型而不是通用的 `Exception`
+- 提供有意义的错误消息
+- 示例:
+```python
+if point_cloud.shape[1] != 3:
+    raise ValueError(f"点云数据必须是Nx3格式，但得到{point_cloud.shape}")
+```
+
+## 日志记录
+
+- 使用模块级别的logger: `logger = logging.getLogger(__name__)`
+- 记录关键操作和错误信息
+- 使用适当的日志级别: INFO, WARNING, ERROR, DEBUG

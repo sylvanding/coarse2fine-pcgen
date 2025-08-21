@@ -1,0 +1,117 @@
+---
+globs: *.py
+description: 模块导入和依赖管理规范
+---
+
+# 模块导入和依赖管理规范
+
+## 导入顺序
+
+按照以下顺序组织导入语句，各组之间用空行分隔：
+
+1. **标准库导入**
+2. **第三方库导入** 
+3. **本地模块导入**
+
+```python
+# 标准库
+import sys
+import os
+from pathlib import Path
+from typing import Optional, Tuple, Union, List
+import logging
+
+# 第三方库
+import numpy as np
+import h5py
+import tifffile
+from scipy.ndimage import gaussian_filter
+
+# 本地模块
+from src.data.h5_loader import PointCloudH5Loader
+from src.voxel.converter import PointCloudToVoxel
+```
+
+## 核心依赖关系
+
+### 数据处理核心库
+- `numpy`: 数值计算和数组操作
+- `h5py`: HDF5文件读写
+- `scipy`: 科学计算（如高斯滤波）
+
+### 图像和可视化
+- `tifffile`: TIFF图像保存
+- `matplotlib`: 数据可视化
+- `open3d`: 3D点云可视化
+
+### 深度学习框架
+- `torch`: PyTorch深度学习框架（用于后续的生成模型）
+
+## 项目内部导入规范
+
+### 相对导入 vs 绝对导入
+- **推荐使用绝对导入**，从项目根目录开始
+- 测试文件和脚本中添加项目根目录到路径：
+
+```python
+# scripts/test_conversion.py
+script_dir = Path(__file__).parent
+project_root = script_dir.parent
+sys.path.insert(0, str(project_root))
+
+from src.data.h5_loader import PointCloudH5Loader
+```
+
+### 模块导入模式
+
+```python
+# 从数据模块导入
+from src.data.h5_loader import PointCloudH5Loader
+from src.data import PointCloudH5Loader  # 当__init__.py中有导出时
+
+# 从体素模块导入
+from src.voxel.converter import PointCloudToVoxel
+
+# 从模型模块导入（开发中）
+# from src.models.voxel_generator import VoxelGenerator
+# from src.models.point_refiner import PointRefiner
+```
+
+## 依赖版本管理
+
+参考 [requirements.txt](mdc:requirements.txt) 的版本要求：
+
+- `h5py>=3.7.0`: H5文件处理
+- `scipy>=1.9.0`: 科学计算
+- `scikit-image>=0.19.0`: 图像处理
+- `tifffile>=2022.8.12`: TIFF文件操作
+- `matplotlib>=3.5.0`: 数据可视化
+- `open3d>=0.16.0`: 3D数据处理
+
+## 条件导入
+
+对于可选依赖，使用条件导入：
+
+```python
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+    logger.warning("PyTorch未安装，生成模型功能不可用")
+```
+
+## 环境设置
+
+推荐的环境配置：
+```bash
+# 创建conda环境
+conda create -n c2f-pcgen python==3.10
+conda activate c2f-pcgen
+
+# 安装PyTorch（CUDA 11.8）
+pip install torch==2.2.1 torchvision==0.17.1 --index-url https://download.pytorch.org/whl/cu118
+
+# 安装其他依赖
+pip install -r requirements.txt
+```
