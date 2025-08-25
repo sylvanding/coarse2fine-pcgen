@@ -215,7 +215,7 @@ class PointCloudToVoxel:
             logger.warning("输入点云为空，返回零体素网格")
             return np.zeros((self.voxel_size, self.voxel_size, self.voxel_size))
         
-        logger.info(f"开始转换点云，点数: {len(point_cloud)}")
+        # logger.info(f"开始转换点云，点数: {len(point_cloud)}")
         
         # 归一化点云坐标
         normalized_points, min_bounds, max_bounds = self._normalize_points(point_cloud)
@@ -239,8 +239,8 @@ class PointCloudToVoxel:
         self._last_min_bounds = min_bounds
         self._last_max_bounds = max_bounds
         
-        logger.info(f"体素转换完成，网格shape: {voxel_grid.shape}")
-        logger.info(f"体素值范围: [{np.min(voxel_grid):.3f}, {np.max(voxel_grid):.3f}]")
+        # logger.info(f"体素转换完成，网格shape: {voxel_grid.shape}")
+        # logger.info(f"体素值范围: [{np.min(voxel_grid):.3f}, {np.max(voxel_grid):.3f}]")
         
         return voxel_grid
     

@@ -1,11 +1,17 @@
 """
-模型模块
+深度学习模型模块
 
-包含体素生成网络和点云精细化网络
+包含3D Diffusion模型和相关组件的实现。
 """
 
-# TODO: 添加具体的模型导入
-# from .voxel_generator import VoxelGenerator
-# from .point_refiner import PointRefiner
+__version__ = "0.2.0"
 
-__all__ = []
+from .diffusion_3d import UNet3D, GaussianDiffusion
+from .diffusion_lightning import DiffusionLightningModule, DiffusionLightningModuleWithEMA
+
+__all__ = [
+    'UNet3D',
+    'GaussianDiffusion', 
+    'DiffusionLightningModule',
+    'DiffusionLightningModuleWithEMA'
+]

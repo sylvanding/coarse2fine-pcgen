@@ -121,7 +121,7 @@ class PointCloudH5Loader:
         with h5py.File(self.file_path, 'r') as f:
             point_cloud = f[self.data_key][index].astype(np.float32)
             
-        logger.info(f"加载样本 {index}，点云shape: {point_cloud.shape}")
+        # logger.info(f"加载样本 {index}，点云shape: {point_cloud.shape}")
         return point_cloud
     
     def load_multiple_clouds(self, indices: List[int]) -> np.ndarray:

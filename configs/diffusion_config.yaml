@@ -1,0 +1,149 @@
+# 3D Diffusion模型配置文件
+# 用于训练基于体素的3D扩散模型
+
+# 数据配置
+data:
+  h5_file_path: "/repos/datasets/batch_simulation_mitochondria.h5"
+  data_key: "point_clouds"
+  train_ratio: 0.9
+  
+  # 体素化参数
+  voxel_size: 64  # 体素网格分辨率 (可选: 32, 64, 128, 256), 128
+  voxelization_method: "gaussian"  # 选项: "occupancy", "density", "gaussian"
+  sigma: 1.0  # 高斯体素化的标准差
+  
+  # 体积参数 (单位: nm)
+  volume_dims: [20000, 20000, 2500]  # [x, y, z] 体积尺寸
+  padding: [0, 0, 100]  # [x, y, z] 边界填充
+  
+  # 数据处理
+  normalize: true  # 是否归一化到[-1, 1]
+  augment: true   # 训练时是否使用数据增强
+  cache_voxels: true  # 是否缓存体素数据
+  max_cache_size: 1000  # 最大缓存样本数
+
+# 模型配置
+model:
+  # UNet架构参数
+  model_channels: 16  # 基础通道数, 32
+  num_res_blocks: 2    # 每层的残差块数量
+  attention_resolutions: [16, 8]  # 使用注意力的分辨率层级
+  channel_mult: [1, 2, 4, 8]     # 各层通道倍数
+  dropout: 0.1         # Dropout率
+  use_attention: true  # 是否使用自注意力机制
+  
+  # 扩散过程参数
+  num_timesteps: 1000  # 扩散步数
+  beta_start: 0.0001   # beta起始值
+  beta_end: 0.02       # beta结束值
+  beta_schedule: "linear"  # beta调度策略: "linear" 或 "cosine"
+  
+  # 高级选项
+  compile_model: false  # 是否编译模型 (PyTorch 2.0+)
+  use_ema: false        # 是否使用指数移动平均
+  ema_decay: 0.9999    # EMA衰减率
+
+# 训练配置
+training:
+  # 基础训练参数
+  batch_size: 2        # 批次大小, original: 1
+  learning_rate: 0.0001  # 学习率
+  weight_decay: 0.01     # 权重衰减
+  warmup_steps: 100     # 学习率预热步数, original: 1000
+  
+  # 学习率调度器配置
+  use_scheduler: false    # 是否使用学习率调度器 (新增)
+  scheduler_type: "cosine"  # 调度器类型: "cosine", "constant", "linear" (新增)
+  
+  # 训练控制
+  max_epochs: 1000      # 最大训练轮数
+  gradient_clip_val: 1.0  # 梯度裁剪值
+  accumulate_grad_batches: 1  # 梯度累积批次
+  
+  # 验证设置
+  val_check_interval: 1.0    # 验证检查间隔 (epoch的比例)
+  limit_val_batches: 100     # 限制验证批次数
+  
+  # 检查点和日志
+  save_top_k: 1          # 保存最好的k个模型
+  monitor: "val_loss"    # 监控指标
+  mode: "min"           # 监控模式
+  save_last: true       # 是否保存最后一个模型
+
+# 验证配置
+validation:
+  # 样本生成
+  sample_interval: 1    # 每N个epoch生成一次验证样本
+  num_samples: 4         # 每次生成的样本数
+  save_tiffs: true       # 是否保存TIFF文件
+  output_dir: "validation_outputs"  # 输出目录
+  
+  # DDIM采样参数
+  ddim_steps: 1000         # DDIM采样步数
+  ddim_eta: 0.0          # DDIM随机性参数 (0为确定性采样)
+
+# 系统配置
+system:
+  # 硬件设置
+  accelerator: "gpu"    # 加速器类型: "auto", "gpu", "cpu"
+  devices: "1"        # 设备数量
+  precision: "16-mixed"  # 精度设置: "32", "16-mixed", "bf16-mixed"
+  
+  # 数据加载
+  num_workers: 1         # DataLoader工作进程数
+  pin_memory: true       # 是否将数据固定在内存
+  persistent_workers: true  # 是否保持工作进程
+  
+  # 性能优化
+  find_unused_parameters: false  # DDP未使用参数检测
+  sync_batchnorm: false          # 是否同步BatchNorm
+  
+  # 调试选项
+  fast_dev_run: false    # 快速开发运行模式
+  overfit_batches: 0     # 过拟合批次数 (调试用)
+  limit_train_batches: 1.0  # 限制训练批次比例
+  
+# 日志和监控配置
+logging:
+  # 实验跟踪
+  experiment_name: "3d_diffusion_voxels"
+  project_name: "coarse2fine-pcgen"
+  
+  # TensorBoard日志
+  log_dir: "logs"
+  log_every_n_steps: 50     # 每N步记录一次日志
+  log_model: false          # 是否记录模型结构
+  
+  # 其他日志
+  save_dir: "checkpoints"   # 检查点保存目录
+  version: null             # 实验版本号 (自动生成)
+
+# 推理配置
+inference:
+  # 生成参数
+  default_num_samples: 8    # 默认生成样本数
+  default_ddim_steps: 1000    # 默认DDIM步数
+  default_ddim_eta: 0.0     # 默认DDIM随机性
+  
+  # 输出设置
+  output_format: "tiff"     # 输出格式: "tiff", "npy"
+  save_intermediate: false  # 是否保存中间步骤
+  
+# 高级配置
+advanced:
+  # 内存优化
+  gradient_checkpointing: false  # 梯度检查点
+  sharded_training: false        # 分片训练
+  
+  # 分布式训练
+  strategy: "auto"          # 训练策略
+  sync_dist: false         # 是否同步分布式指标
+  
+  # 自动调优
+  auto_lr_find: false      # 自动学习率搜索
+  auto_scale_batch_size: false  # 自动批次大小调整
+  
+  # 回调函数
+  enable_progress_bar: true     # 是否显示进度条
+  enable_model_summary: true    # 是否显示模型摘要
+  enable_checkpointing: true    # 是否启用自动检查点
