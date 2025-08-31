@@ -1,5 +1,5 @@
 ---
-globs: src/models/*.py,**/train_*.py,**/model_*.py
+globs: src/models/*.py,**/train_*.py,**/model_*.py,scripts/3d_diffusion/*.py
 description: 深度学习模型开发规范
 ---
 
@@ -7,16 +7,89 @@ description: 深度学习模型开发规范
 
 ## 模型架构设计
 
-### 基础模型结构
+### 3D扩散模型架构
 ```python
+# 参考 src/models/diffusion_3d.py
 import torch
 import torch.nn as nn
+from typing import Optional
 
+class Diffusion3D(nn.Module):
+    """
+    3D扩散模型
+    
+    基于DDPM的3D体素扩散生成模型，用于生成高质量的体素表示。
+    支持条件生成和无条件生成两种模式。
+    """
+    
+    def __init__(self, 
+                 voxel_size: int = 64,
+                 in_channels: int = 1,
+                 model_channels: int = 128,
+                 num_res_blocks: int = 2,
+                 attention_resolutions: tuple = (16, 8),
+                 dropout: float = 0.0,
+                 channel_mult: tuple = (1, 2, 4, 8)):
+        super().__init__()
+        self.voxel_size = voxel_size
+        self.in_channels = in_channels
+        self.model_channels = model_channels
+        
+        # U-Net架构组件
+        self.input_blocks = nn.ModuleList()
+        self.middle_block = None
+        self.output_blocks = nn.ModuleList()
+        
+        # 时间嵌入
+        self.time_embed = nn.Sequential(
+            nn.Linear(model_channels, model_channels * 4),
+            nn.SiLU(),
+            nn.Linear(model_channels * 4, model_channels * 4)
+        )
+        
+    def forward(self, x: torch.Tensor, timesteps: torch.Tensor, 
+                context: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        扩散模型前向传播
+        
+        Args:
+            x: 噪声体素张量，shape为(batch_size, channels, D, H, W)
+            timesteps: 时间步，shape为(batch_size,)
+            context: 可选的条件信息
+            
+        Returns:
+            预测的噪声，shape与输入x相同
+        """
+        # 时间嵌入
+        t_emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
+        
+        # U-Net前向传播
+        h = x
+        hs = []
+        
+        # 下采样路径
+        for module in self.input_blocks:
+            h = module(h, t_emb, context)
+            hs.append(h)
+            
+        # 中间块
+        h = self.middle_block(h, t_emb, context)
+        
+        # 上采样路径
+        for module in self.output_blocks:
+            h = torch.cat([h, hs.pop()], dim=1)
+            h = module(h, t_emb, context)
+            
+        return h
+```
+
+### 传统体素生成模型
+```python
 class VoxelGenerator(nn.Module):
     """
     体素生成网络
     
-    基于VAE/GAN/Diffusion的3D体素生成模型，用于生成高质量的
+    基于VAE/GAN的3D体素生成模型，用于生成高质量的
     体素表示，作为点云生成的中间步骤。
     """
     
@@ -69,9 +142,86 @@ class PointRefiner(nn.Module):
 
 ## 训练流程规范
 
-### 训练脚本结构
+### 扩散模型训练脚本结构
 ```python
-# scripts/train_voxel_generator.py
+# scripts/3d_diffusion/train_diffusion.py - 扩散模型训练
+def main():
+    """扩散模型主训练流程"""
+    # 1. 参数和配置解析
+    args = parse_arguments()
+    config = load_config(args.config_path)
+    
+    # 2. 设备和分布式配置
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    # 3. 数据加载（体素数据集）
+    train_loader, val_loader = create_voxel_data_loaders(config)
+    
+    # 4. 扩散模型初始化
+    model = Diffusion3D(
+        voxel_size=config.voxel_size,
+        model_channels=config.model_channels
+    ).to(device)
+    
+    # 5. 扩散调度器
+    noise_scheduler = DDPMScheduler(
+        num_train_timesteps=config.num_timesteps,
+        beta_schedule="linear"
+    )
+    
+    # 6. 优化器
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
+    
+    # 7. 扩散训练循环
+    for epoch in range(config.epochs):
+        train_loss = train_diffusion_epoch(
+            model, train_loader, optimizer, noise_scheduler, device
+        )
+        
+        # 8. 验证和采样
+        if epoch % config.val_interval == 0:
+            val_loss = validate_diffusion_epoch(model, val_loader, noise_scheduler, device)
+            sample_and_save(model, noise_scheduler, epoch, config.output_dir)
+        
+        # 9. 保存检查点
+        save_checkpoint(model, optimizer, epoch, train_loss, config.checkpoint_dir)
+
+def train_diffusion_epoch(model, train_loader, optimizer, noise_scheduler, device):
+    """扩散模型训练单个epoch"""
+    model.train()
+    total_loss = 0
+    
+    for batch in train_loader:
+        # 获取干净的体素数据
+        clean_voxels = batch['voxel_grid'].to(device)
+        
+        # 随机采样时间步
+        timesteps = torch.randint(0, noise_scheduler.num_train_timesteps, 
+                                (clean_voxels.shape[0],), device=device)
+        
+        # 添加噪声
+        noise = torch.randn_like(clean_voxels)
+        noisy_voxels = noise_scheduler.add_noise(clean_voxels, noise, timesteps)
+        
+        # 预测噪声
+        pred_noise = model(noisy_voxels, timesteps)
+        
+        # 计算损失
+        loss = F.mse_loss(pred_noise, noise)
+        
+        # 反向传播
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        
+        total_loss += loss.item()
+    
+    return total_loss / len(train_loader)
+```
+
+### 传统训练脚本结构
+```python
+# scripts/train_voxel_generator.py - 传统生成模型训练
 def main():
     """主训练流程"""
     # 1. 参数解析

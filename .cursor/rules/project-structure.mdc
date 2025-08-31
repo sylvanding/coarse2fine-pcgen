@@ -20,8 +20,9 @@ description: 项目结构和架构指南
    - 支持占有网格、密度网格、高斯密度等多种体素化方法
 
 3. **模型层** ([src/models/](mdc:src/models/))
-   - 计划包含体素生成网络和点云精细化网络
-   - 目前正在开发中
+   - [diffusion_3d.py](mdc:src/models/diffusion_3d.py): 3D扩散模型实现
+   - [diffusion_lightning.py](mdc:src/models/diffusion_lightning.py): PyTorch Lightning训练框架
+   - 包含体素生成网络和点云精细化网络
 
 4. **工具层** ([src/utils/](mdc:src/utils/))
    - 可视化和辅助工具
@@ -33,10 +34,24 @@ description: 项目结构和架构指南
 3. **体素→点云采样**: 将生成的体素重新采样为点云
 4. **精细化网络**: 使用PointNet++等网络进行逐点微调
 
-## 入口点
+## 脚本入口点
 
-- 主要测试脚本: [scripts/test_conversion.py](mdc:scripts/test_conversion.py)
-- 单元测试: [tests/](mdc:tests/) 目录下的测试文件
+### 体素转换相关 ([scripts/test_conversion/](mdc:scripts/test_conversion/))
+
+- [test_conversion.py](mdc:scripts/test_conversion/test_conversion.py): 主要的体素转换测试脚本
+- [create_sample_data.py](mdc:scripts/test_conversion/create_sample_data.py): 生成测试数据
+- [demo_new_features.py](mdc:scripts/test_conversion/demo_new_features.py): 新功能演示
+
+### 3D扩散模型相关 ([scripts/3d_diffusion/](mdc:scripts/3d_diffusion/))
+
+- [train_diffusion.py](mdc:scripts/3d_diffusion/train_diffusion.py): 扩散模型训练脚本
+- [generate_samples.py](mdc:scripts/3d_diffusion/generate_samples.py): 样本生成脚本
+- [test_diffusion_system.py](mdc:scripts/3d_diffusion/test_diffusion_system.py): 扩散系统测试
+- [run_example.py](mdc:scripts/3d_diffusion/run_example.py): 运行示例
+
+### 单元测试
+
+- [tests/](mdc:tests/) 目录下的测试文件
 
 ## 数据格式要求
 

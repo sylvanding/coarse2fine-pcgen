@@ -207,3 +207,7 @@ output/
 *.tiff
 *.h5
 experiments/
+self-sample/
+test_correspondence/
+validation_outputs/
+refine-exp*/

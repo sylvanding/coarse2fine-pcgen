@@ -1,0 +1,141 @@
+---
+description: Scripts目录组织结构和使用指南
+globs: scripts/**/*.py
+---
+
+# Scripts目录组织指南
+
+scripts目录按功能模块分为两个主要子目录，每个子目录包含相关的脚本文件。
+
+## 目录结构
+
+### test_conversion/ - 体素转换相关脚本
+专门处理点云与体素之间的转换操作，包括测试、演示和数据生成。
+
+**主要脚本：**
+- [test_conversion.py](mdc:scripts/test_conversion/test_conversion.py)
+  - 主要的体素转换测试脚本
+  - 包含点云→体素和体素→点云的完整测试流程
+  - 支持多种体素化方法的性能对比
+  
+- [create_sample_data.py](mdc:scripts/test_conversion/create_sample_data.py)
+  - 生成标准化的测试数据
+  - 创建不同规模和复杂度的点云样本
+  - 用于性能基准测试
+
+### 3d_diffusion/ - 3D扩散模型相关脚本
+专门处理3D扩散模型的训练、推理和测试操作。
+
+**主要脚本：**
+- [train_diffusion.py](mdc:scripts/3d_diffusion/train_diffusion.py)
+  - 3D扩散模型的训练脚本
+  - 支持多种数据集和训练配置
+  - 集成PyTorch Lightning训练框架
+  
+- [generate_samples.py](mdc:scripts/3d_diffusion/generate_samples.py)
+  - 使用训练好的模型生成3D样本
+  - 支持批量生成和可视化
+  - 包含质量评估指标
+  
+- [test_diffusion_system.py](mdc:scripts/3d_diffusion/test_diffusion_system.py)
+  - 扩散系统的完整性测试
+  - 验证训练和推理流程
+  - 性能基准测试
+  
+- [run_example.py](mdc:scripts/3d_diffusion/run_example.py)
+  - 快速示例脚本
+  - 演示基本使用方法
+  - 用于新用户入门
+
+## 使用规范
+
+### 脚本执行环境
+所有脚本都应该从项目根目录执行：
+```bash
+# 从项目根目录运行
+python scripts/test_conversion/test_conversion.py
+python scripts/3d_diffusion/train_diffusion.py
+```
+
+### 导入路径规范
+脚本中的导入应该使用绝对路径：
+```python
+# 在脚本开头添加路径设置
+import sys
+from pathlib import Path
+script_dir = Path(__file__).parent
+project_root = script_dir.parent.parent  # 回到项目根目录
+sys.path.insert(0, str(project_root))
+
+# 使用绝对导入
+from src.data.h5_loader import PointCloudH5Loader
+from src.voxel.converter import PointCloudToVoxel
+from src.models.diffusion_3d import Diffusion3D
+```
+
+### 输出目录规范
+- 测试输出：`outputs/test_conversion/`
+- 训练输出：`outputs/3d_diffusion/`
+- 生成样本：`outputs/generated_samples/`
+- 可视化结果：`outputs/visualizations/`
+
+### 配置文件规范
+- 体素转换配置：在脚本内部定义或使用命令行参数
+- 扩散模型配置：使用独立的配置文件（YAML或JSON格式）
+
+## 开发指南
+
+### 添加新脚本时的规范
+1. **选择正确的目录**
+   - 体素转换相关：放在 `test_conversion/`
+   - 扩散模型相关：放在 `3d_diffusion/`
+   
+2. **命名规范**
+   - 使用描述性的文件名
+   - 采用snake_case命名法
+   - 添加适当的前缀（如`test_`, `train_`, `demo_`）
+
+3. **文档要求**
+   - 每个脚本都应包含详细的模块级文档字符串
+   - 说明脚本的用途、参数和输出
+   - 提供使用示例
+
+4. **依赖管理**
+   - 确保所有依赖都在requirements.txt中声明
+   - 对于特定脚本的依赖，在脚本开头注释说明
+
+### 脚本模板
+```python
+"""
+[脚本名称] - [简要描述]
+
+[详细描述脚本的功能和用途]
+
+Usage:
+    python scripts/[子目录]/[脚本名].py [参数]
+
+Example:
+    python scripts/test_conversion/test_conversion.py --voxel-size 64
+"""
+
+import sys
+from pathlib import Path
+
+# 添加项目根目录到Python路径
+script_dir = Path(__file__).parent
+project_root = script_dir.parent.parent
+sys.path.insert(0, str(project_root))
+
+# 导入项目模块
+from src.data.h5_loader import PointCloudH5Loader
+# ... 其他导入
+
+def main():
+    """主函数"""
+    pass
+
+if __name__ == "__main__":
+    main()
+```
+
+这种组织结构确保了代码的模块化、可维护性和清晰的功能分离。
