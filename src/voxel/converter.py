@@ -766,3 +766,22 @@ class PointCloudToVoxel:
             info['last_max_bounds'] = self._last_max_bounds.tolist()
         
         return info
+
+    def downsample_voxel_grid(self, voxel_grid: np.ndarray, output_size: int) -> np.ndarray:
+        """
+        对体素网格进行下采样以降低分辨率
+        
+        Args:
+            voxel_grid (np.ndarray): 输入体素网格
+            output_size (int): 输出体素网格分辨率
+        
+        Returns:
+            np.ndarray: 下采样后的体素网格
+        """
+        if output_size < 0:
+            raise ValueError("输出体素网格分辨率必须大于0")
+        
+        if output_size < self.voxel_size:
+            return zoom(voxel_grid, output_size/self.voxel_size, order=1, mode='constant')
+        else:
+            return voxel_grid

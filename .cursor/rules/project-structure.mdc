@@ -40,13 +40,11 @@ description: 项目结构和架构指南
 
 - [test_conversion.py](mdc:scripts/test_conversion/test_conversion.py): 主要的体素转换测试脚本
 - [create_sample_data.py](mdc:scripts/test_conversion/create_sample_data.py): 生成测试数据
-- [demo_new_features.py](mdc:scripts/test_conversion/demo_new_features.py): 新功能演示
 
 ### 3D扩散模型相关 ([scripts/3d_diffusion/](mdc:scripts/3d_diffusion/))
 
 - [train_diffusion.py](mdc:scripts/3d_diffusion/train_diffusion.py): 扩散模型训练脚本
 - [generate_samples.py](mdc:scripts/3d_diffusion/generate_samples.py): 样本生成脚本
-- [test_diffusion_system.py](mdc:scripts/3d_diffusion/test_diffusion_system.py): 扩散系统测试
 - [run_example.py](mdc:scripts/3d_diffusion/run_example.py): 运行示例
 
 ### 单元测试

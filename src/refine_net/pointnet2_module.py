@@ -112,7 +112,8 @@ class PointConvFP(MessagePassing):
         add = [pos_target,] if x_target is None else [x_target, pos_target]
         aggr_out = torch.cat([aggr_out, *add], dim=1)
 
-        if self.mlp is not None: aggr_out = self.mlp(aggr_out)
+        if self.mlp is not None: 
+            aggr_out = self.mlp(aggr_out)
 
         return aggr_out
 

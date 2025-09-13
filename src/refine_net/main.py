@@ -150,15 +150,34 @@ def validate(model, val_dataset, device, args, iteration, writer=None):
     
     with torch.no_grad():
         for i in range(len(val_dataset.sample_indices)):
-            gt_pc, noisy_pc = val_dataset[i]
-            gt_pc, noisy_pc = gt_pc.to(device), noisy_pc.to(device)
+            batch_data = val_dataset[i]
             
-            # 添加batch维度
-            noisy_batch = noisy_pc.unsqueeze(0)
-            gt_batch = gt_pc.unsqueeze(0)
-            
-            # 模型预测
-            refined_pc = model(noisy_batch)
+            # 处理数据（支持体素指导）
+            if isinstance(batch_data, (list, tuple)) and len(batch_data) == 3:
+                # 使用体素指导: (gt_pc, noisy_pc, voxel_grid)
+                gt_pc, noisy_pc, voxel_grid = batch_data
+                gt_pc, noisy_pc, voxel_grid = gt_pc.to(device), noisy_pc.to(device), voxel_grid.to(device)
+                
+                # 添加batch维度
+                noisy_batch = noisy_pc.unsqueeze(0)
+                gt_batch = gt_pc.unsqueeze(0)
+                voxel_batch = voxel_grid.unsqueeze(0)
+                
+                # 模型预测
+                refined_pc = model(noisy_batch, voxel_batch)
+            elif isinstance(batch_data, (list, tuple)) and len(batch_data) == 2:
+                # 不使用体素指导: (gt_pc, noisy_pc)
+                gt_pc, noisy_pc = batch_data
+                gt_pc, noisy_pc = gt_pc.to(device), noisy_pc.to(device)
+                
+                # 添加batch维度
+                noisy_batch = noisy_pc.unsqueeze(0)
+                gt_batch = gt_pc.unsqueeze(0)
+                
+                # 模型预测
+                refined_pc = model(noisy_batch)
+            else:
+                raise ValueError(f"不支持的验证数据格式")
             
             # 计算损失
             val_loss = chamfer_distance(refined_pc, gt_batch, mse=args.mse)
@@ -274,16 +293,25 @@ def inference_iteration(model, inference_dataset, device, args, iteration, write
             sample_idx = data['sample_idx']
             num_points = data['num_points']
             
-            print(f"处理样本 {sample_idx}, 点数: {num_points}")
+            # 体素数据（如果启用体素指导）
+            voxel_grid = data.get('voxel_grid', None)
+            if voxel_grid is not None:
+                voxel_grid = voxel_grid.to(device)
+            
+            use_voxel_grid_str = "是" if voxel_grid is not None else "否"
+            print(f"处理样本 {sample_idx}, 点数: {num_points}, 使用体素指导: {use_voxel_grid_str}")
             
             # 分批处理大规模点云
             if num_points > args.sample_points:
                 refined_normalized = process_large_pointcloud(
-                    model, noisy_normalized, args.sample_points, device
+                    model, noisy_normalized, args.sample_points, device, voxel_grid
                 )
             else:
                 # 直接处理
-                refined_normalized = model(noisy_normalized.unsqueeze(0))[0]  # (3, N)
+                if model.use_voxel_guidance and voxel_grid is not None:
+                    refined_normalized = model(noisy_normalized.unsqueeze(0), voxel_grid.unsqueeze(0))[0]  # (3, N)
+                else:
+                    refined_normalized = model(noisy_normalized.unsqueeze(0))[0]  # (3, N)
             
             # 反归一化: (3, N) -> (N, 3)
             refined_normalized_np = refined_normalized.transpose(0, 1).cpu().numpy()
@@ -302,7 +330,7 @@ def inference_iteration(model, inference_dataset, device, args, iteration, write
     print(f"=== 第 {iteration} 次迭代推理完成 ===\n")
 
 
-def process_large_pointcloud(model, noisy_pc, batch_size, device):
+def process_large_pointcloud(model, noisy_pc, batch_size, device, voxel_grid=None):
     """
     分批处理大规模点云
     
@@ -311,6 +339,7 @@ def process_large_pointcloud(model, noisy_pc, batch_size, device):
         noisy_pc: 噪声点云 (3, N)
         batch_size: 批处理大小
         device: 设备
+        voxel_grid: 体素网格 (C, D, H, W)，可选
         
     Returns:
         torch.Tensor: 修正后的点云 (3, N)
@@ -333,7 +362,10 @@ def process_large_pointcloud(model, noisy_pc, batch_size, device):
             batch = torch.cat([batch, padding], dim=1)
         
         # 模型推理
-        refined_batch = model(batch.unsqueeze(0))[0]  # (3, batch_size)
+        if model.use_voxel_guidance and voxel_grid is not None:
+            refined_batch = model(batch.unsqueeze(0), voxel_grid.unsqueeze(0))[0]  # (3, batch_size)
+        else:
+            refined_batch = model(batch.unsqueeze(0))[0]  # (3, batch_size)
         
         # 移除padding
         if end_idx - start_idx < batch_size:
@@ -429,7 +461,7 @@ def train(args):
     start_time = time.time()
     current_best_loss = best_loss
     
-    for i, (gt_pc, noisy_pc) in enumerate(tqdm(train_loader, desc="训练进度")):
+    for i, batch_data in enumerate(tqdm(train_loader, desc="训练进度")):
         # 调整实际迭代计数
         actual_iteration = i + start_iteration
         
@@ -437,13 +469,27 @@ def train(args):
         # if i < start_iteration and start_iteration > 0:
         #     continue
         
-        gt_pc, noisy_pc = gt_pc.to(device), noisy_pc.to(device)
+        # 处理数据批次（支持体素指导）
+        if isinstance(batch_data, (list, tuple)) and len(batch_data) == 3:
+            # 使用体素指导: (gt_pc, noisy_pc, voxel_grid)
+            gt_pc, noisy_pc, voxel_grid = batch_data
+            gt_pc, noisy_pc, voxel_grid = gt_pc.to(device), noisy_pc.to(device), voxel_grid.to(device)
+        elif isinstance(batch_data, (list, tuple)) and len(batch_data) == 2:
+            # 不使用体素指导: (gt_pc, noisy_pc)
+            gt_pc, noisy_pc = batch_data
+            gt_pc, noisy_pc = gt_pc.to(device), noisy_pc.to(device)
+            voxel_grid = None
+        else:
+            raise ValueError(f"不支持的批次数据格式: {type(batch_data)}, 长度: {len(batch_data) if hasattr(batch_data, '__len__') else 'N/A'}")
         
         model.train()
         optimizer.zero_grad()
         
         # 前向传播：在噪声点云上预测修正
-        refined_pc = model(noisy_pc)
+        if model.use_voxel_guidance and voxel_grid is not None:
+            refined_pc = model(noisy_pc, voxel_grid)
+        else:
+            refined_pc = model(noisy_pc)
         
         # 计算损失：修正后点云与GT点云的差异
         loss = chamfer_distance(refined_pc, gt_pc, mse=args.mse)

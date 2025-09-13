@@ -94,6 +94,19 @@ def main_train():
     print(f"体积维度: {args.volume_dims}")
     print(f"边界填充: {args.padding}")
     
+    # 体素指导配置
+    print("\n--- 体素指导配置 ---")
+    print(f"使用体素指导: {args.use_voxel_guidance}")
+    if args.use_voxel_guidance:
+        print(f"体素H5文件: {args.voxel_h5_path}")
+        print(f"体素数据键: {args.voxel_data_key}")
+        print(f"体素网格尺寸: {args.voxel_grid_size}")
+        print(f"体素卷积通道: {args.voxel_conv_channels}")
+        print(f"体素下采样因子: {args.voxel_downsample_factors}")
+        print(f"体素插值方式: {args.voxel_interpolation_mode}")
+    else:
+        print("体素指导功能已禁用")
+    
     # 恢复训练信息
     if resume_training:
         print("\n--- 恢复训练配置 ---")

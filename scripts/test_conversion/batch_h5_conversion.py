@@ -3,7 +3,9 @@
 批量H5点云转换脚本
 
 此脚本用于批量处理H5文件中的所有点云样本，将每个点云转换为体素网格，
-然后采样回点云，最终将所有生成的点云保存为新的H5文件。
+然后采样回点云，最终将所有生成的点云及其对应的体素网格保存为新的H5文件。
+
+新增动态写入体素网格功能，避免内存占用过高。
 
 使用方法:
     python scripts/batch_h5_conversion.py --input data/input.h5 --output data/output.h5
@@ -17,6 +19,7 @@ import numpy as np
 import h5py
 from pathlib import Path
 from tqdm import tqdm
+from contextlib import nullcontext
 
 # 添加项目根目录到Python路径
 script_dir = Path(__file__).parent
@@ -34,6 +37,191 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+class DynamicVoxelH5Writer:
+    """
+    支持动态写入的HDF5体素文件写入器
+    
+    使用HDF5的可变大小数据集和分块存储，避免在内存中构建完整数据集
+    """
+    
+    def __init__(self, output_path: str, voxel_key: str, sample_ids: np.ndarray,
+                 voxel_size: int, voxel_dtype: str, chunk_size: int = 1,
+                 compression: str = 'gzip', compression_opts: int = 9):
+        """
+        初始化动态HDF5写入器
+        
+        Args:
+            output_path (str): 输出H5文件路径
+            voxel_key (str): 体素数据的键名
+            sample_ids (np.ndarray): 样本ID数组
+            voxel_size (int): 体素网格大小
+            voxel_dtype (str): 体素数据类型
+            chunk_size (int): 分块大小，默认为1（逐个写入）
+            compression (str): 压缩方法
+            compression_opts (int): 压缩级别
+        """
+        self.output_path = output_path
+        self.voxel_key = voxel_key
+        self.sample_ids = sample_ids
+        self.voxel_size = voxel_size
+        self.chunk_size = chunk_size
+        self.compression = compression
+        self.compression_opts = compression_opts
+        
+        # 解析数据类型
+        if hasattr(np, voxel_dtype):
+            self.target_dtype = getattr(np, voxel_dtype)
+        else:
+            self.target_dtype = np.dtype(voxel_dtype)
+        
+        self.h5_file = None
+        self.voxel_dataset = None
+        self.current_index = 0
+        self.total_samples = len(sample_ids)
+        
+        logger.info(f"初始化动态HDF5写入器: {output_path}")
+        logger.info(f"体素数据类型: {voxel_dtype} (实际: {self.target_dtype})")
+        logger.info(f"预期样本数: {self.total_samples}")
+    
+    def __enter__(self):
+        """进入上下文管理器"""
+        self.open()
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """退出上下文管理器"""
+        self.close()
+    
+    def open(self):
+        """打开HDF5文件并创建可变大小数据集"""
+        try:
+            # 创建输出目录
+            output_dir = os.path.dirname(self.output_path)
+            if output_dir and not os.path.exists(output_dir):
+                os.makedirs(output_dir, exist_ok=True)
+            
+            # 打开HDF5文件
+            self.h5_file = h5py.File(self.output_path, 'w')
+            
+            # 创建可变大小的体素数据集
+            # 第一个维度设为None，表示可变大小
+            voxel_shape = (None, self.voxel_size, self.voxel_size, self.voxel_size)
+            voxel_maxshape = (None, self.voxel_size, self.voxel_size, self.voxel_size)
+            
+            # 设置分块大小 - 每个chunk包含一个完整的体素网格
+            chunk_shape = (self.chunk_size, self.voxel_size, self.voxel_size, self.voxel_size)
+            
+            self.voxel_dataset = self.h5_file.create_dataset(
+                self.voxel_key,
+                shape=(0, self.voxel_size, self.voxel_size, self.voxel_size),  # 初始大小为0
+                maxshape=voxel_maxshape,
+                dtype=self.target_dtype,
+                chunks=chunk_shape,
+                compression=self.compression,
+                compression_opts=self.compression_opts
+            )
+            
+            # 创建sample_ids数据集
+            self.sample_ids_dataset = self.h5_file.create_dataset(
+                'sample_ids',
+                data=self.sample_ids,
+                compression=self.compression,
+                compression_opts=self.compression_opts
+            )
+            
+            logger.info(f"创建可变大小体素数据集: 形状 {voxel_shape}, 分块 {chunk_shape}")
+            
+        except Exception as e:
+            if self.h5_file:
+                self.h5_file.close()
+            raise RuntimeError(f"打开HDF5文件失败: {e}")
+    
+    def write_voxel(self, voxel_grid: np.ndarray, sample_index: int):
+        """
+        写入单个体素网格
+        
+        Args:
+            voxel_grid (np.ndarray): 体素网格数据 (D, W, H)
+            sample_index (int): 样本索引（用于验证）
+        """
+        if self.voxel_dataset is None:
+            raise RuntimeError("HDF5数据集未初始化")
+        
+        # 验证体素网格形状
+        expected_shape = (self.voxel_size, self.voxel_size, self.voxel_size)
+        if voxel_grid.shape != expected_shape:
+            raise ValueError(f"体素网格形状不匹配: 期望 {expected_shape}, 实际 {voxel_grid.shape}")
+        
+        # 转换数据类型
+        voxel_data = voxel_grid.astype(self.target_dtype)
+        
+        # 扩展数据集大小
+        new_size = self.current_index + 1
+        self.voxel_dataset.resize((new_size, self.voxel_size, self.voxel_size, self.voxel_size))
+        
+        # 写入数据
+        self.voxel_dataset[self.current_index] = voxel_data
+        
+        self.current_index += 1
+        
+        # 可选：定期刷新数据到磁盘
+        if self.current_index % 10 == 0:
+            self.h5_file.flush()
+    
+    def write_metadata(self, args, processing_stats: dict, failed_indices: list):
+        """
+        写入元数据和属性
+        
+        Args:
+            args: 命令行参数
+            processing_stats (dict): 处理统计信息
+            failed_indices (list): 失败的样本索引
+        """
+        if self.h5_file is None:
+            return
+        
+        # 保存元数据
+        self.h5_file.attrs['original_file'] = args.input
+        self.h5_file.attrs['original_data_key'] = args.data_key
+        self.h5_file.attrs['point_cloud_output'] = args.output
+        self.h5_file.attrs['total_samples'] = self.current_index
+        self.h5_file.attrs['voxel_size'] = args.voxel_size
+        self.h5_file.attrs['voxel_dtype'] = args.voxel_dtype
+        self.h5_file.attrs['actual_dtype'] = str(self.target_dtype)
+        self.h5_file.attrs['processing_range'] = f"{args.start_index}-{args.end_index-1 if args.end_index else 'end'}"
+        self.h5_file.attrs['successful_samples'] = processing_stats.get('successful', 0)
+        self.h5_file.attrs['failed_samples'] = processing_stats.get('failed', 0)
+        
+        # 保存转换参数
+        conv_params = self.h5_file.create_group('conversion_parameters')
+        conv_params.attrs['method'] = args.method
+        conv_params.attrs['voxel_size'] = args.voxel_size
+        conv_params.attrs['voxel_dtype'] = args.voxel_dtype
+        conv_params.attrs['sigma'] = args.sigma
+        conv_params.attrs['padding_ratio'] = args.padding_ratio
+        conv_params.attrs['volume_dims'] = args.volume_dims
+        conv_params.attrs['padding'] = args.padding
+        conv_params.attrs['upsample'] = args.upsample
+        conv_params.attrs['upsample_factor'] = args.upsample_factor
+        conv_params.attrs['upsample_method'] = args.upsample_method
+        
+        # 保存失败索引（如果有）
+        if failed_indices:
+            self.h5_file.create_dataset('failed_indices', data=failed_indices)
+    
+    def close(self):
+        """关闭HDF5文件"""
+        if self.h5_file:
+            self.h5_file.close()
+            self.h5_file = None
+            logger.info(f"HDF5文件已关闭: {self.output_path}")
+            logger.info(f"实际写入样本数: {self.current_index}")
+    
+    def get_written_count(self) -> int:
+        """获取已写入的样本数"""
+        return self.current_index
 
 
 def parse_arguments():
@@ -59,6 +247,9 @@ def parse_arguments():
     
     # 自定义体积参数
     python scripts/batch_h5_conversion.py --input data/input.h5 --output data/output.h5 --volume-dims 15000 15000 3000 --padding 50 50 150
+    
+    # 同时保存体素网格用于后续体素指导去噪
+    python scripts/batch_h5_conversion.py --input data/input.h5 --output data/output.h5 --voxel-output data/voxels.h5
         """
     )
     
@@ -71,7 +262,7 @@ def parse_arguments():
     
     parser.add_argument(
         '--output', '-o',
-        default="/repos/datasets/batch_simulation_mitochondria_noised.h5",
+        default="/repos/datasets/batch_simulation_mitochondria_noised.h5", # points
         type=str,
         help='输出H5文件路径'
     )
@@ -87,7 +278,7 @@ def parse_arguments():
     parser.add_argument(
         '--voxel-size',
         type=int,
-        default=256,
+        default=128,
         help='体素网格分辨率 (默认: 256)'
     )
     
@@ -110,6 +301,34 @@ def parse_arguments():
         type=str,
         default='point_clouds',
         help='输出H5文件中数据的键名 (默认: point_clouds)'
+    )
+    
+    parser.add_argument(
+        '--voxel-output',
+        type=str,
+        default='/repos/datasets/batch_simulation_mitochondria_voxels.h5', # voxels
+        help='体素网格输出H5文件路径，空字符串则不保存体素网格 (默认: 不保存)'
+    )
+    
+    parser.add_argument(
+        '--voxel-output-size',
+        type=int,
+        default=128,
+        help='保存体素网格分辨率 (默认: 128, 如果比体素分辨率小, 则下采样到该输出分辨率)'
+    )
+    
+    parser.add_argument(
+        '--voxel-key',
+        type=str,
+        default='voxel_grids',
+        help='体素网格在H5文件中的键名 (默认: voxel_grids)'
+    )
+    
+    parser.add_argument(
+        '--voxel-dtype',
+        type=str,
+        default='float16',
+        help='体素网格数据类型 (默认: float16)。支持: float16, float32, float64, int8, int16, int32, int64, bool等'
     )
     
     parser.add_argument(
@@ -238,6 +457,13 @@ def validate_inputs(args):
         logger.info(f"创建输出目录: {output_dir}")
         os.makedirs(output_dir, exist_ok=True)
     
+    # 检查体素输出目录（如果需要保存体素网格）
+    if args.voxel_output:
+        voxel_output_dir = os.path.dirname(args.voxel_output)
+        if voxel_output_dir and not os.path.exists(voxel_output_dir):
+            logger.info(f"创建体素输出目录: {voxel_output_dir}")
+            os.makedirs(voxel_output_dir, exist_ok=True)
+    
     # 验证参数范围
     if args.voxel_size <= 0:
         raise ValueError("体素大小必须大于0")
@@ -262,9 +488,18 @@ def validate_inputs(args):
     
     if args.start_index < 0:
         raise ValueError("start_index必须非负")
+    
+    # 验证voxel_dtype是否为有效的numpy数据类型
+    if not hasattr(np, args.voxel_dtype):
+        # 尝试解析字符串格式的dtype
+        try:
+            np.dtype(args.voxel_dtype)
+        except TypeError:
+            raise ValueError(f"无效的体素数据类型: {args.voxel_dtype}. "
+                           f"支持的类型包括: float16, float32, float64, int8, int16, int32, bool等")
 
 
-def process_single_point_cloud(point_cloud: np.ndarray, converter: PointCloudToVoxel, args) -> np.ndarray:
+def process_single_point_cloud(point_cloud: np.ndarray, converter: PointCloudToVoxel, args) -> tuple:
     """
     处理单个点云样本
     
@@ -274,7 +509,7 @@ def process_single_point_cloud(point_cloud: np.ndarray, converter: PointCloudToV
         args: 命令行参数
     
     Returns:
-        np.ndarray: 生成的点云
+        tuple: (生成的点云, 体素网格) 如果不需要保存体素网格，则体素网格为None
     """
     # 1. 点云转体素
     if args.method == 'gaussian':
@@ -298,7 +533,10 @@ def process_single_point_cloud(point_cloud: np.ndarray, converter: PointCloudToV
         method=args.sample_method
     )
     
-    return generated_point_cloud
+    # 4. 根据需要返回体素网格
+    return_voxel = voxel_grid if args.voxel_output else None
+    
+    return generated_point_cloud, return_voxel
 
 
 def get_max_points_count(generated_clouds: list) -> int:
@@ -388,7 +626,38 @@ def batch_h5_conversion(args):
             padding=args.padding
         )
         
-        # 3. 批量处理点云
+        if hasattr(np, args.voxel_dtype):
+            target_dtype = getattr(np, args.voxel_dtype)
+        else:
+            target_dtype = np.dtype(args.voxel_dtype)
+        
+        # 3. 准备对应的sample_ids
+        output_sample_ids = None
+        if sample_ids is not None:
+            # 提取处理范围内的sample_ids
+            output_sample_ids = sample_ids[start_idx:end_idx]
+            logger.info(f"提取对应的sample_ids: {len(output_sample_ids)} 个")
+        else:
+            # 使用索引作为ID
+            output_sample_ids = np.arange(start_idx, end_idx)
+            logger.info(f"使用索引作为sample_ids: {start_idx} 到 {end_idx-1}")
+        
+        # 4. 初始化体素动态写入器（如果需要）
+        voxel_writer = None
+        if args.voxel_output:
+            logger.info(f"初始化体素动态写入器: {args.voxel_output}")
+            voxel_writer = DynamicVoxelH5Writer(
+                output_path=args.voxel_output,
+                voxel_key=args.voxel_key,
+                sample_ids=output_sample_ids,
+                voxel_size=args.voxel_size,
+                voxel_dtype=args.voxel_dtype,
+                chunk_size=1,
+                compression='gzip',
+                compression_opts=9
+            )
+        
+        # 4. 批量处理点云
         logger.info("开始批量处理点云...")
         generated_clouds = []
         failed_indices = []
@@ -399,57 +668,73 @@ def batch_h5_conversion(args):
             'empty_results': 0
         }
         
-        # 使用tqdm显示进度
-        progress_bar = tqdm(
-            range(start_idx, end_idx, args.batch_size),
-            desc="处理中",
-            unit="batch"
-        )
-        
-        for batch_start in progress_bar:
-            batch_end = min(batch_start + args.batch_size, end_idx)
-            batch_indices = list(range(batch_start, batch_end))
+        # 使用上下文管理器处理体素写入器
+        with voxel_writer if voxel_writer else nullcontext() as vw:
+            # 使用tqdm显示进度
+            progress_bar = tqdm(
+                range(start_idx, end_idx, args.batch_size),
+                desc="处理中",
+                unit="batch"
+            )
             
-            for idx in batch_indices:
-                processing_stats['total_processed'] += 1
+            for batch_start in progress_bar:
+                batch_end = min(batch_start + args.batch_size, end_idx)
+                batch_indices = list(range(batch_start, batch_end))
                 
-                try:
-                    # 加载点云
-                    point_cloud = loader.load_single_cloud(idx)
+                for idx in batch_indices:
+                    processing_stats['total_processed'] += 1
                     
-                    # 处理点云
-                    generated_cloud = process_single_point_cloud(point_cloud, converter, args)
-                    
-                    if len(generated_cloud) == 0:
-                        processing_stats['empty_results'] += 1
-                        if args.verbose:
-                            logger.warning(f"样本 {idx} 生成的点云为空")
+                    try:
+                        # 加载点云
+                        point_cloud = loader.load_single_cloud(idx)
                         
-                        if not args.skip_errors:
-                            raise ValueError(f"样本 {idx} 生成的点云为空")
-                    
-                    generated_clouds.append(generated_cloud)
-                    processing_stats['successful'] += 1
-                    
-                    # 更新进度条描述
-                    progress_bar.set_postfix({
-                        'Success': processing_stats['successful'],
-                        'Failed': processing_stats['failed'],
-                        'Empty': processing_stats['empty_results']
-                    })
-                    
-                except Exception as e:
-                    processing_stats['failed'] += 1
-                    failed_indices.append(idx)
-                    
-                    if args.skip_errors:
-                        logger.warning(f"处理样本 {idx} 时出错，跳过: {e}")
-                        # 添加空的点云占位
-                        generated_clouds.append(np.empty((0, 3)))
-                        continue
-                    else:
-                        logger.error(f"处理样本 {idx} 时出错: {e}")
-                        raise
+                        # 处理点云
+                        generated_cloud, voxel_grid = process_single_point_cloud(point_cloud, converter, args)
+                        
+                        if len(generated_cloud) == 0:
+                            processing_stats['empty_results'] += 1
+                            if args.verbose:
+                                logger.warning(f"样本 {idx} 生成的点云为空")
+                            
+                            if not args.skip_errors:
+                                raise ValueError(f"样本 {idx} 生成的点云为空")
+                        
+                        generated_clouds.append(generated_cloud)
+                        
+                        # 逐个写入体素网格（如果需要）
+                        if vw and voxel_grid is not None:
+                            # voxel_grid = converter.downsample_voxel_grid(voxel_grid, args.voxel_output_size)
+                            vw.write_voxel(voxel_grid.astype(target_dtype), idx)
+                        
+                        processing_stats['successful'] += 1
+                        
+                        # 更新进度条描述
+                        progress_bar.set_postfix({
+                            'Success': processing_stats['successful'],
+                            'Failed': processing_stats['failed'],
+                            'Empty': processing_stats['empty_results']
+                        })
+                        
+                    except Exception as e:
+                        processing_stats['failed'] += 1
+                        failed_indices.append(idx)
+                        
+                        if args.skip_errors:
+                            logger.warning(f"处理样本 {idx} 时出错，跳过: {e}")
+                            # 添加空的点云占位
+                            generated_clouds.append(np.empty((0, 3)))
+                            if vw:
+                                # 添加空的体素网格占位
+                                empty_voxel = np.zeros((args.voxel_size, args.voxel_size, args.voxel_size), dtype=target_dtype)
+                                vw.write_voxel(empty_voxel, idx)
+                            continue
+                        else:
+                            logger.error(f"处理样本 {idx} 时出错: {e}")
+                            raise
+            
+            # 写入体素文件的元数据
+            if vw:
+                vw.write_metadata(args, processing_stats, failed_indices)
         
         progress_bar.close()
         
@@ -477,26 +762,18 @@ def batch_h5_conversion(args):
         
         # 填充点云到统一形状
         padded_clouds = pad_point_clouds(generated_clouds, max_points)
-        
-        # 6. 准备对应的sample_ids
-        output_sample_ids = None
-        if sample_ids is not None:
-            # 提取处理范围内的sample_ids
-            output_sample_ids = sample_ids[start_idx:end_idx]
-            logger.info(f"提取对应的sample_ids: {len(output_sample_ids)} 个")
-        else:
-            # 使用索引作为ID
-            output_sample_ids = np.arange(start_idx, end_idx)
-            logger.info(f"使用索引作为sample_ids: {start_idx} 到 {end_idx-1}")
-        
-        # 7. 保存到H5文件
-        logger.info(f"正在保存到H5文件: {args.output}")
+                
+        # 6. 保存点云到H5文件
+        logger.info(f"正在保存点云到H5文件: {args.output}")
         
         with h5py.File(args.output, 'w') as f:
+            # 只保留小数点后两位
+            padded_clouds = np.round(padded_clouds, 2)
+            
             # 保存主要数据
             dataset = f.create_dataset(
                 args.output_key,
-                data=padded_clouds,
+                data=padded_clouds.astype(np.float16),
                 compression='gzip',
                 compression_opts=9
             )
@@ -541,18 +818,35 @@ def batch_h5_conversion(args):
             # 保存实际点数信息
             actual_point_counts = [len(cloud) for cloud in generated_clouds]
             f.create_dataset('actual_point_counts', data=actual_point_counts)
+            
+            # 记录体素网格保存信息
+            f.attrs['voxel_output_file'] = args.voxel_output if args.voxel_output else 'None'
+            f.attrs['voxel_data_key'] = args.voxel_key if args.voxel_output else 'None'
         
-        # 8. 输出总结
+        # 8. 体素网格已在处理循环中动态写入完成
+        if args.voxel_output:
+            logger.info(f"体素网格已动态保存到: {args.voxel_output}")
+            if voxel_writer:
+                logger.info(f"实际写入体素样本数: {voxel_writer.get_written_count()}")
+        
+        # 9. 输出总结
         print("\n" + "="*60)
         print("✅ 批量转换完成!")
         print("="*60)
         print(f"📁 输入文件: {args.input}")
-        print(f"📁 输出文件: {args.output}")
+        print(f"📁 点云输出文件: {args.output}")
+        if args.voxel_output:
+            print(f"📁 体素输出文件: {args.voxel_output}")
         print(f"📊 处理样本: {processing_stats['total_processed']}")
         print(f"✅ 成功: {processing_stats['successful']}")
         print(f"❌ 失败: {processing_stats['failed']}")
         print(f"🔸 空结果: {processing_stats['empty_results']}")
-        print(f"📦 输出形状: {padded_clouds.shape}")
+        print(f"📦 点云输出形状: {padded_clouds.shape}")
+        if args.voxel_output and voxel_writer:
+            written_count = voxel_writer.get_written_count()
+            voxel_shape = (written_count, args.voxel_size, args.voxel_size, args.voxel_size)
+            print(f"📦 体素输出形状: {voxel_shape}")
+            print(f"📊 体素数据类型: {args.voxel_dtype} (实际: {target_dtype})")
         print(f"🎯 最大点数: {max_points}")
         print(f"🔗 Sample IDs: {'保留原始对应关系' if sample_ids is not None else '使用索引ID'}")
         
@@ -568,7 +862,9 @@ def batch_h5_conversion(args):
             f.write("="*50 + "\n\n")
             f.write(f"处理时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write(f"输入文件: {args.input}\n")
-            f.write(f"输出文件: {args.output}\n")
+            f.write(f"点云输出文件: {args.output}\n")
+            if args.voxel_output:
+                f.write(f"体素输出文件: {args.voxel_output}\n")
             f.write(f"处理范围: {start_idx} 到 {end_idx-1}\n\n")
             
             f.write("处理统计:\n")
@@ -580,6 +876,7 @@ def batch_h5_conversion(args):
             f.write("转换参数:\n")
             f.write(f"  method: {args.method}\n")
             f.write(f"  voxel_size: {args.voxel_size}\n")
+            f.write(f"  voxel_dtype: {args.voxel_dtype}\n")
             f.write(f"  sigma: {args.sigma}\n")
             f.write(f"  sample_method: {args.sample_method}\n")
             f.write(f"  sample_num_points: {args.sample_num_points}\n")
@@ -588,7 +885,12 @@ def batch_h5_conversion(args):
                 f.write(f"  upsample_factor: {args.upsample_factor}\n")
                 f.write(f"  upsample_method: {args.upsample_method}\n")
             
-            f.write(f"\n输出数据形状: {padded_clouds.shape}\n")
+            f.write(f"\n点云输出数据形状: {padded_clouds.shape}\n")
+            if args.voxel_output and voxel_writer:
+                written_count = voxel_writer.get_written_count()
+                voxel_shape = (written_count, args.voxel_size, args.voxel_size, args.voxel_size)
+                f.write(f"体素输出数据形状: {voxel_shape}\n")
+                f.write(f"体素数据类型: {args.voxel_dtype} (实际: {target_dtype})\n")
             f.write(f"最大点数: {max_points}\n")
             f.write(f"Sample IDs: {'保留原始对应关系' if sample_ids is not None else '使用索引ID'}\n")
             
@@ -806,10 +1108,10 @@ if __name__ == '__main__':
     import sys
     
     # --- test mode ---
-    sys.argv.append('test')
-    sys.argv.append('/repos/datasets/batch_simulation_mitochondria.h5')
-    sys.argv.append('/repos/datasets/batch_simulation_mitochondria_noised.h5')
-    sys.argv.append('100')
+    # sys.argv.append('test')
+    # sys.argv.append('/repos/datasets/batch_simulation_mitochondria.h5')
+    # sys.argv.append('/repos/datasets/batch_simulation_mitochondria_noised.h5')
+    # sys.argv.append('100')
     
     # 检查是否是测试模式
     if len(sys.argv) > 1 and sys.argv[1] == 'test':
