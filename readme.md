@@ -58,6 +58,15 @@ pip install torch==2.2.1 torchvision==0.17.1 --index-url https://download.pytorc
 pip install -r requirements.txt
 ```
 
+## GPUSHARE
+
+```text
+3090
+PyTorch 221
+Cuda 121
+Python 311
+```
+
 ## 快速开始
 
 ### 1. 测试点云到体素转换
