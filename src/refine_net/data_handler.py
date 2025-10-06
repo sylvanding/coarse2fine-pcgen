@@ -158,6 +158,57 @@ class H5PairedDataset(Dataset):
         denormalized[:, 2] = (denormalized[:, 2] + 1) / 2 * (y_max - y_min) + z_min  # [-1, 1] -> [z_min, z_max] # 无缩放,统一系
         
         return denormalized
+    
+    def add_noise_to_points(self, point_cloud: np.ndarray) -> np.ndarray:
+        """
+        对点云添加随机噪声漂移
+        
+        Args:
+            point_cloud: 形状为 (N, 3) 的归一化点云 (坐标范围在[-1, 1])
+            
+        Returns:
+            numpy.ndarray: 添加噪声后的点云，坐标依然限制在[-1, 1]范围内
+        """
+        if not getattr(self.args, 'add_training_noise', False):
+            return point_cloud
+        
+        # 仅在训练模式下添加噪声
+        if self.split != 'train':
+            return point_cloud
+            
+        noisy_pc = point_cloud.copy()
+        N = noisy_pc.shape[0]
+        
+        # 获取噪声参数
+        noise_ratio = getattr(self.args, 'noise_ratio', 0.1)
+        noise_scale = getattr(self.args, 'noise_scale', 0.02) 
+        noise_type = getattr(self.args, 'noise_type', 'gaussian')
+        
+        # 计算需要添加噪声的点数
+        num_noisy_points = int(N * noise_ratio)
+        if num_noisy_points == 0:
+            return noisy_pc
+        
+        # 随机选择要添加噪声的点
+        noisy_indices = np.random.choice(N, num_noisy_points, replace=False)
+        
+        # 生成噪声
+        if noise_type == 'gaussian':
+            # 高斯噪声：标准差为noise_scale
+            noise = np.random.normal(0, noise_scale, size=(num_noisy_points, 3))
+        elif noise_type == 'uniform':
+            # 均匀噪声：[-noise_scale, noise_scale]范围内
+            noise = np.random.uniform(-noise_scale, noise_scale, size=(num_noisy_points, 3))
+        else:
+            raise ValueError(f"不支持的噪声类型: {noise_type}")
+        
+        # 添加噪声到选中的点
+        noisy_pc[noisy_indices] += noise
+        
+        # 确保坐标依然在[-1, 1]范围内
+        noisy_pc = np.clip(noisy_pc, -1.0, 1.0)
+        
+        return noisy_pc
 
     def _sample_points(self, point_cloud: np.ndarray, num_points: int) -> np.ndarray:
         """
@@ -214,6 +265,9 @@ class H5PairedDataset(Dataset):
             num_points = getattr(self.args, 'sample_points', 2048)
             gt_sampled = self._sample_points(gt_pc, num_points)
             noisy_sampled = self._sample_points(noisy_pc, num_points)
+            
+            # 对噪声点云添加额外的随机漂移（仅训练时）
+            noisy_sampled = self.add_noise_to_points(noisy_sampled)
         
         # 转换为torch tensor并调整维度: (points, 3) -> (3, points)
         gt_tensor = torch.from_numpy(gt_sampled).transpose(0, 1).to(self.device)

@@ -71,7 +71,7 @@ def parse_arguments():
     
     parser.add_argument(
         '--output', '-o',
-        default="/repos/datasets/exp-data-4pi-pc-mt/mt_exp_pointcloud_samples_noised.h5",
+        default="/repos/datasets/exp-data-4pi-pc-mt/mt_exp_pointcloud_samples_noised_128.h5",
         type=str,
         help='输出H5文件路径'
     )
@@ -87,7 +87,7 @@ def parse_arguments():
     parser.add_argument(
         '--voxel-size',
         type=int,
-        default=256,
+        default=128,
         help='体素网格分辨率 (默认: 256)'
     )
     

@@ -78,8 +78,18 @@ def get_parser(name='Self-Sampling') -> argparse.ArgumentParser:
     parser.add_argument('--checkpoint-interval', type=int, default=20000,
                         help='检查点保存间隔（iteration数）')
     
+    # 噪声增强参数
+    parser.add_argument('--add-training-noise', action='store_true', default=False,
+                        help='训练时是否对噪声点云添加额外随机漂移')
+    parser.add_argument('--noise-ratio', type=float, default=0.2,
+                        help='添加噪声的点数比例 (0.0-1.0)')
+    parser.add_argument('--noise-scale', type=float, default=0.2,
+                        help='噪声漂移的最大幅度 (相对于归一化坐标范围)')
+    parser.add_argument('--noise-type', type=str, default='gaussian', choices=['gaussian', 'uniform'],
+                        help='噪声类型：gaussian（高斯噪声）或uniform（均匀噪声）')
+    
     # 继续训练参数
-    parser.add_argument('--resume-from', type=str, default='/repos/coarse2fine-pcgen/refine-exp/checkpoints/final_checkpoint.pt',
+    parser.add_argument('--resume-from', type=str, default='/repos/coarse2fine-pcgen/refine-exp-ckpt/iteration_260000.pt',
                         help='从指定检查点恢复训练。支持格式：\n'
                              '- latest: 自动寻找最新检查点\n'
                              '- best: 寻找最佳检查点\n'
