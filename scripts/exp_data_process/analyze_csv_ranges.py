@@ -274,7 +274,7 @@ class CSVRangeAnalyzer:
 
 
 def main():
-    sys.argv.append("/repos/datasets/exp-data-4pi-pc-mt")
+    sys.argv.append("/repos/datasets/exp-data-4pi-pc-mitochondria/Mitochondria_for_Agent")
     
     """主函数"""
     if len(sys.argv) != 2:

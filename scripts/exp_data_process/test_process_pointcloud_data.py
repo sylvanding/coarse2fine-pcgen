@@ -92,7 +92,7 @@ def visualize_pointcloud_xy(
     figsize: tuple = (8, 8),
     dpi: int = 200,
     cmap: str = 'jet',
-    point_size: float = 0.1,
+    point_size: float = 0.5,
     show_colorbar: bool = True,
     show_stats: bool = False
 ) -> None:
@@ -509,22 +509,22 @@ def main():
     # =========================
     
     # 输入目录（包含CSV文件）
-    INPUT_DIR = "/repos/datasets/exp-data-4pi-pc-mt"
+    INPUT_DIR = "/repos/datasets/exp-data-4pi-pc-mitochondria/Mitochondria_for_Agent"
     
     # 输出目录
-    OUTPUT_DIR = "/repos/datasets/exp-data-4pi-pc-mt/mt_exp_pointcloud_samples_test"
+    OUTPUT_DIR = "/repos/datasets/exp-data-4pi-pc-mitochondria/mt_exp_pointcloud_samples_test"
     
     # 生成样本数量（测试用，建议使用较小的值）
     NUM_SAMPLES = 50
     
     # 提取区域大小（单位：nm）
-    REGION_SIZE = (8000.0, 8000.0, 300.0)  # x, y, z
+    REGION_SIZE = (8000.0, 8000.0, 1200.0)  # x, y, z
     
     # 期望点数
-    TARGET_POINTS = 20000 * 4
+    TARGET_POINTS = 20000 * 2
     
     # 最小点数要求
-    MIN_POINTS = 20000 * 4
+    MIN_POINTS = 20000 * 2
     
     # 每个CSV的最大尝试次数
     MAX_ATTEMPTS = 20

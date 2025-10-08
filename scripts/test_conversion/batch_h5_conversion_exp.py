@@ -64,14 +64,14 @@ def parse_arguments():
     
     parser.add_argument(
         '--input', '-i',
-        default="/repos/datasets/exp-data-4pi-pc-mt/mt_exp_pointcloud_samples.h5",
+        default="/repos/datasets/exp-data-4pi-pc-mitochondria/mito_exp_pointcloud_samples.h5",
         type=str,
         help='输入H5文件路径'
     )
     
     parser.add_argument(
         '--output', '-o',
-        default="/repos/datasets/exp-data-4pi-pc-mt/mt_exp_pointcloud_samples_noised_128.h5",
+        default="/repos/datasets/exp-data-4pi-pc-mitochondria/mito_exp_pointcloud_samples_noised_128.h5",
         type=str,
         help='输出H5文件路径'
     )
@@ -123,7 +123,7 @@ def parse_arguments():
         '--volume-dims',
         type=float,
         nargs=3,
-        default=[8000, 8000, 300],
+        default=[8000, 8000, 1200],
         help='体积尺寸 [x, y, z] (单位: nm) (默认: [20000, 20000, 2500])'
     )
     
@@ -139,7 +139,7 @@ def parse_arguments():
     parser.add_argument(
         '--sample-num-points',
         type=int,
-        default=80000,
+        default=40000,
         help='采样回点云的目标点数 (默认: 100000)'
     )
     
@@ -168,7 +168,7 @@ def parse_arguments():
     parser.add_argument(
         '--upsample-factor',
         type=float,
-        default=2.0,
+        default=1.0,
         help='上采样倍数 (默认: 2.0)'
     )
     
@@ -847,8 +847,8 @@ if __name__ == '__main__':
     
     # --- test mode ---
     # sys.argv.append('test')
-    # sys.argv.append('/repos/datasets/exp-data-4pi-pc-mt/mt_exp_pointcloud_samples.h5')
-    # sys.argv.append('/repos/datasets/exp-data-4pi-pc-mt/mt_exp_pointcloud_samples_noised.h5')
+    # sys.argv.append('/repos/datasets/exp-data-4pi-pc-mitochondria/mito_exp_pointcloud_samples.h5')
+    # sys.argv.append('/repos/datasets/exp-data-4pi-pc-mitochondria/mito_exp_pointcloud_samples_noised_128.h5')
     # sys.argv.append('7')
     
     # 检查是否是测试模式

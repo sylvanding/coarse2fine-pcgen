@@ -24,7 +24,7 @@ sys.path.insert(0, str(project_root))
 
 # 尝试导入配置文件
 try:
-    from scripts.exp_data_process import config_mt as config
+    from scripts.exp_data_process import config_mito as config
 
     CONFIG_LOADED = True
 except ImportError:
