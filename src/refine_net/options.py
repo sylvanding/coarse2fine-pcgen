@@ -61,9 +61,9 @@ def get_parser(name='Self-Sampling') -> argparse.ArgumentParser:
                         help='训练数据占比')
     
     # 归一化参数
-    parser.add_argument('--volume-dims', type=int, nargs=3, default=[20000, 20000, 2500],
+    parser.add_argument('--volume-dims', type=int, nargs=3, default=[8000, 8000, 300],
                         help='体积维度 [x, y, z]')
-    parser.add_argument('--padding', type=int, nargs=3, default=[0, 0, 100],
+    parser.add_argument('--padding', type=int, nargs=3, default=[0, 0, 0],
                         help='边界填充 [x, y, z]')
     
     # TensorBoard和推理参数

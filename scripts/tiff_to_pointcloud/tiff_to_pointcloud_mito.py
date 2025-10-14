@@ -211,7 +211,7 @@ def parse_arguments():
     parser.add_argument(
         '--input', '-i',
         type=str,
-        default='/repos/datasets/exp-data-4pi-pc-mt/3d_diffusion/generated_sample_03.tiff',
+        default='/repos/datasets/exp-data-4pi-pc-mitochondria/3d_diffusion/generated_sample_03.tiff',
         # required=True,
         help='输入TIFF文件路径（支持通配符模式如"*.tiff"）'
     )
@@ -219,7 +219,7 @@ def parse_arguments():
     parser.add_argument(
         '--output', '-o',
         type=str,
-        default='/repos/datasets/exp-data-4pi-pc-mt/3d_diffusion/generated_sample_03_points.csv',
+        default='/repos/datasets/exp-data-4pi-pc-mitochondria/3d_diffusion/generated_sample_03_points.csv',
         help='输出CSV文件路径（单文件模式时必需）'
     )
     
@@ -239,7 +239,7 @@ def parse_arguments():
     parser.add_argument(
         '--num-points',
         type=int,
-        default=80000,
+        default=40000,
         help='目标采样点数，None时自动根据体素密度确定 (默认: 100000)'
     )
     
@@ -255,7 +255,7 @@ def parse_arguments():
         '--volume-dims',
         type=float,
         nargs=3,
-        default=[8000, 8000, 300],
+        default=[8000, 8000, 1200],
         help='体积尺寸 [x, y, z] (单位: nm) (默认: [20000, 20000, 2500])'
     )
     

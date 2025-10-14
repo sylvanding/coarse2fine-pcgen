@@ -281,11 +281,11 @@ def main_inference():
     parser = options.get_parser('RefineNet CSV点云修正推理')
     
     # 输入输出参数
-    parser.add_argument('--model-path', type=str, default='/repos/datasets/exp-data-4pi-pc-mt/3d_diffusion/iteration_940000.pt',
+    parser.add_argument('--model-path', type=str, default='/repos/datasets/exp-data-4pi-pc-mitochondria/3d_diffusion/iteration_580000.pt',
                         help='训练好的模型路径')
-    parser.add_argument('--csv-path', type=str, default='/repos/datasets/exp-data-4pi-pc-mt/3d_diffusion/generated_sample_03_points.csv',
+    parser.add_argument('--csv-path', type=str, default='/repos/datasets/exp-data-4pi-pc-mitochondria/3d_diffusion/generated_sample_03_points.csv',
                         help='输入CSV点云文件路径')
-    parser.add_argument('--output-dir', type=str, default='/repos/datasets/exp-data-4pi-pc-mt/3d_diffusion/generated_sample_03_points_refined',
+    parser.add_argument('--output-dir', type=str, default='/repos/datasets/exp-data-4pi-pc-mitochondria/3d_diffusion/generated_sample_03_points_refined',
                         help='推理结果输出目录')
     # `options` has defined these parameters
     # parser.add_argument('--sample-points', type=int, default=80000,
@@ -296,6 +296,8 @@ def main_inference():
     #                     help='边界填充 [x, y, z]')
     
     args = parser.parse_args()
+    
+    args.volume_dims = [8000, 8000, 1200]
     
     # 检查输入文件
     if not os.path.exists(args.model_path):
