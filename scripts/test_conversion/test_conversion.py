@@ -66,21 +66,38 @@ def parse_arguments():
     
     # 自定义体积参数转换
     python scripts/test_conversion.py --input data/sample.h5 --output test_custom.tiff --volume-dims 15000 15000 3000 --padding 50 50 150
+    
+    # 保存原始点云
+    python scripts/test_conversion.py --input data/sample.h5 --output test_voxel.tiff --save-original --original-output original_pointcloud.csv
         """
     )
     
     parser.add_argument(
         '--input', '-i',
-        default='/repos/datasets/batch_simulation_mitochondria.h5',
+        default='/repos/datasets/exp-data-4pi-pc-mt/mt_exp_pointcloud_samples.h5',
         type=str,
         help='输入H5文件路径'
     )
     
     parser.add_argument(
         '--output', '-o',
-        default='output/test_voxel.tiff',
+        default='/repos/datasets/exp-data-4pi-pc-mt/superresolution_results/test_voxel.tiff',
         type=str,
         help='输出TIFF文件路径'
+    )
+    
+    parser.add_argument(
+        '--save-original',
+        default=True,
+        action='store_true',
+        help='是否保存原始点云为CSV文件'
+    )
+    
+    parser.add_argument(
+        '--original-output',
+        type=str,
+        default=None,
+        help='原始点云输出文件路径（默认基于--output参数生成）'
     )
     
     parser.add_argument(
@@ -130,7 +147,7 @@ def parse_arguments():
         '--volume-dims',
         type=float,
         nargs=3,
-        default=[20000, 20000, 2500],
+        default=[8000, 8000, 300],
         help='体积尺寸 [x, y, z] (单位: nm) (默认: [20000, 20000, 2500])'
     )
     
@@ -138,7 +155,7 @@ def parse_arguments():
         '--padding',
         type=float,
         nargs=3,
-        default=[0, 0, 100],
+        default=[0, 0, 0],
         help='体积边界填充 [x, y, z] (单位: nm) (默认: [0, 0, 100])'
     )
     
@@ -182,7 +199,7 @@ def parse_arguments():
     # 体素上采样参数
     parser.add_argument(
         '--upsample',
-        default=True,
+        default=False,
         action='store_true',
         help='是否对体素网格进行上采样'
     )
@@ -416,10 +433,30 @@ def test_conversion_pipeline(args):
         logger.info(f"正在加载样本 {args.index}...")
         point_cloud = loader.load_single_cloud(args.index)
         
-        # 3. 分析点云
+        # 3. 保存原始点云（如果需要）
+        if args.save_original:
+            # 确定原始点云输出路径
+            if args.original_output:
+                original_output = args.original_output
+            else:
+                # 基于输出文件路径生成原始点云文件名
+                original_output = args.output.replace('.tiff', '_original.csv').replace('.tif', '_original.csv')
+            
+            logger.info(f"正在保存原始点云到: {original_output}")
+            
+            # 确保输出目录存在
+            original_output_dir = os.path.dirname(original_output)
+            if original_output_dir and not os.path.exists(original_output_dir):
+                os.makedirs(original_output_dir, exist_ok=True)
+            
+            # 保存原始点云
+            converter_temp = PointCloudToVoxel()  # 临时创建转换器用于保存功能
+            converter_temp.save_point_cloud(point_cloud, original_output)
+        
+        # 4. 分析点云
         point_stats = analyze_point_cloud(point_cloud)
         
-        # 4. 创建体素转换器
+        # 5. 创建体素转换器
         logger.info(f"创建体素转换器 (方法: {args.method}, 大小: {args.voxel_size})")
         logger.info(f"体积尺寸: {args.volume_dims} nm")
         logger.info(f"填充: {args.padding} nm")
@@ -431,17 +468,17 @@ def test_conversion_pipeline(args):
             padding=args.padding
         )
         
-        # 5. 执行转换
+        # 6. 执行转换
         logger.info("正在执行点云到体素的转换...")
         if args.method == 'gaussian':
             voxel_grid = converter.convert(point_cloud, sigma=args.sigma)
         else:
             voxel_grid = converter.convert(point_cloud)
         
-        # 6. 分析体素网格
+        # 7. 分析体素网格
         voxel_stats = analyze_voxel_grid(voxel_grid)
         
-        # 7. 体素上采样（如果需要）
+        # 8. 体素上采样（如果需要）
         upsampled_grid = None
         upsampled_stats = None
         if args.upsample:
@@ -458,7 +495,7 @@ def test_conversion_pipeline(args):
             logger.info(f"正在保存上采样体素网格到: {upsampled_output}")
             converter.save_as_tiff(upsampled_grid, upsampled_output)
         
-        # 8. 体素采样回点云（如果需要）
+        # 9. 体素采样回点云（如果需要）
         sampled_point_cloud = None
         sampled_stats = None
         comparison = None
@@ -485,15 +522,15 @@ def test_conversion_pipeline(args):
             else:
                 logger.warning("采样得到的点云为空")
         
-        # 9. 保存原始体素网格TIFF文件
+        # 10. 保存原始体素网格TIFF文件
         logger.info(f"正在保存体素网格到: {args.output}")
         converter.save_as_tiff(voxel_grid, args.output)
         
-        # 10. 显示统计信息
+        # 11. 显示统计信息
         if args.verbose:
             print_statistics(point_stats, voxel_stats, sampled_stats, comparison, upsampled_stats)
         
-        # 11. 保存转换信息
+        # 12. 保存转换信息
         conversion_info = converter.get_conversion_info()
         info_file = args.output.replace('.tiff', '_info.txt').replace('.tif', '_info.txt')
         
@@ -502,7 +539,16 @@ def test_conversion_pipeline(args):
             f.write("="*50 + "\n\n")
             f.write(f"输入文件: {args.input}\n")
             f.write(f"样本索引: {args.index}\n")
-            f.write(f"输出文件: {args.output}\n\n")
+            f.write(f"输出文件: {args.output}\n")
+            
+            if args.save_original:
+                if args.original_output:
+                    original_output = args.original_output
+                else:
+                    original_output = args.output.replace('.tiff', '_original.csv').replace('.tif', '_original.csv')
+                f.write(f"原始点云文件: {original_output}\n")
+            
+            f.write("\n")
             
             f.write("转换参数:\n")
             for key, value in conversion_info.items():
@@ -544,11 +590,18 @@ def test_conversion_pipeline(args):
         
         logger.info(f"转换信息已保存到: {info_file}")
         
-        # 12. 输出总结
+        # 13. 输出总结
         print("\n✅ 转换完成!")
         print(f"📊 输入: {point_stats['num_points']:,} 个点")
         print(f"📦 体素网格: {voxel_stats['shape']}")
         print(f"💾 TIFF文件: {args.output}")
+        
+        if args.save_original:
+            if args.original_output:
+                original_output = args.original_output
+            else:
+                original_output = args.output.replace('.tiff', '_original.csv').replace('.tif', '_original.csv')
+            print(f"📄 原始点云: {original_output}")
         
         if args.upsample and upsampled_grid is not None:
             upsampled_output = args.output.replace('.tiff', '_upsampled.tiff').replace('.tif', '_upsampled.tif')
