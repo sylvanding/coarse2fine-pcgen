@@ -3,24 +3,24 @@
 
 # 数据配置
 data:
-  h5_file_path: "/repos/datasets/batch_simulation_mitochondria.h5"
+  h5_file_path: "/repos/datasets/batch_simulation_microtubule_20251017_2048.h5"
   data_key: "point_clouds"
-  train_ratio: 0.9
+  train_ratio: 0.95
   
   # 体素化参数
-  voxel_size: 64  # 体素网格分辨率 (可选: 32, 64, 128, 256), 128
+  voxel_size: 256  # 体素网格分辨率 (可选: 32, 64, 128, 256), 128
   voxelization_method: "gaussian"  # 选项: "occupancy", "density", "gaussian"
   sigma: 1.0  # 高斯体素化的标准差
   
   # 体积参数 (单位: nm)
-  volume_dims: [20000, 20000, 2500]  # [x, y, z] 体积尺寸
-  padding: [0, 0, 100]  # [x, y, z] 边界填充
+  volume_dims: [20000, 20000, 600]  # [x, y, z] 体积尺寸
+  padding: [0, 0, 200]  # [x, y, z] 边界填充
   
   # 数据处理
   normalize: true  # 是否归一化到[-1, 1]
   augment: true   # 训练时是否使用数据增强
   cache_voxels: true  # 是否缓存体素数据
-  max_cache_size: 1000  # 最大缓存样本数
+  max_cache_size: 1  # 最大缓存样本数
 
 # 模型配置
 model:
@@ -29,7 +29,7 @@ model:
   num_res_blocks: 2    # 每层的残差块数量
   attention_resolutions: [16, 8]  # 使用注意力的分辨率层级
   channel_mult: [1, 2, 4, 8]     # 各层通道倍数
-  dropout: 0.1         # Dropout率
+  dropout: 0.0         # Dropout率
   use_attention: true  # 是否使用自注意力机制
   
   # 扩散过程参数
