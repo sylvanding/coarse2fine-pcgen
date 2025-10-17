@@ -490,30 +490,37 @@ class EMA(nn.Module):
         """注册模型参数"""
         for name, param in self.model.named_parameters():
             if param.requires_grad:
-                self.shadow[name] = param.data.clone()
+                self.shadow[name] = param.data.clone().detach()
     
     def update(self):
         """更新EMA参数"""
         for name, param in self.model.named_parameters():
             if param.requires_grad:
-                assert name in self.shadow
-                new_average = (1.0 - self.decay) * param.data.to(self.device) + self.decay * self.shadow[name].to(self.device)
-                self.shadow[name] = new_average.clone()
+                assert name in self.shadow, f"参数 {name} 不在shadow中"
+                # 获取模型当前设备
+                device = param.device
+                # 确保shadow参数在同一设备上
+                shadow = self.shadow[name].to(device)
+                # 更新EMA参数
+                new_average = (1.0 - self.decay) * param.data + self.decay * shadow
+                self.shadow[name] = new_average.clone().detach()
     
     def apply_shadow(self):
         """应用EMA参数"""
         for name, param in self.model.named_parameters():
             if param.requires_grad:
-                assert name in self.shadow
-                self.backup[name] = param.data.clone()
-                param.data = self.shadow[name]
+                assert name in self.shadow, f"参数 {name} 不在shadow中"
+                # 备份当前参数
+                self.backup[name] = param.data.clone().detach()
+                # 确保shadow参数在同一设备上后再应用
+                param.data = self.shadow[name].to(param.device).clone()
     
     def restore(self):
         """恢复原始参数"""
         for name, param in self.model.named_parameters():
             if param.requires_grad:
-                assert name in self.backup
-                param.data = self.backup[name]
+                assert name in self.backup, f"参数 {name} 不在backup中"
+                param.data = self.backup[name].to(param.device).clone()
         self.backup = {}
 
 
@@ -529,6 +536,15 @@ class DiffusionLightningModuleWithEMA(DiffusionLightningModule):
         self.ema = EMA(self.model, decay=ema_decay)
         
         logger.info(f"启用EMA，衰减率: {ema_decay}")
+    
+    def on_train_start(self) -> None:
+        """训练开始时的回调，确保EMA参数在正确的设备上"""
+        super().on_train_start()
+        # 将EMA的shadow参数移动到模型所在的设备
+        device = next(self.model.parameters()).device
+        for name in self.ema.shadow:
+            self.ema.shadow[name] = self.ema.shadow[name].to(device)
+        logger.info(f"EMA shadow参数已移动到设备: {device}")
     
     def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> STEP_OUTPUT:
         """训练步骤（带EMA更新）"""
@@ -562,3 +578,12 @@ class DiffusionLightningModuleWithEMA(DiffusionLightningModule):
         finally:
             # 恢复原始权重
             self.ema.restore()
+    
+    def on_load_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
+        """加载检查点时的回调，确保EMA参数设备同步"""
+        super().on_load_checkpoint(checkpoint)
+        # 将EMA的shadow参数移动到模型所在的设备
+        device = next(self.model.parameters()).device
+        for name in self.ema.shadow:
+            self.ema.shadow[name] = self.ema.shadow[name].to(device)
+        logger.info(f"从检查点加载后，EMA shadow参数已移动到设备: {device}")

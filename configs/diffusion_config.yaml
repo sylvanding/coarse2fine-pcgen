@@ -19,8 +19,8 @@ data:
   # 数据处理
   normalize: true  # 是否归一化到[-1, 1]
   augment: true   # 训练时是否使用数据增强
-  cache_voxels: true  # 是否缓存体素数据
-  max_cache_size: 1000  # 最大缓存样本数
+  cache_voxels: false  # 是否缓存体素数据
+  max_cache_size: 1  # 最大缓存样本数
 
 # 模型配置
 model:
@@ -40,8 +40,8 @@ model:
   
   # 高级选项
   compile_model: false  # 是否编译模型 (PyTorch 2.0+)
-  use_ema: false        # 是否使用指数移动平均
-  ema_decay: 0.9999    # EMA衰减率
+  use_ema: true        # 是否使用指数移动平均
+  ema_decay: 0.99    # EMA衰减率
 
 # 训练配置
 training:
@@ -73,7 +73,7 @@ training:
 # 验证配置
 validation:
   # 样本生成
-  sample_interval: 1    # 每N个epoch生成一次验证样本
+  sample_interval: 5    # 每N个epoch生成一次验证样本
   num_samples: 4         # 每次生成的样本数
   save_tiffs: true       # 是否保存TIFF文件
   output_dir: "validation_outputs"  # 输出目录
