@@ -1,0 +1,153 @@
+# MONAI 3D Latent Diffusion Model Configuration - High Resolution
+# 专门针对高分辨率体素（如256x256x64）优化的配置文件
+
+# 数据配置
+data:
+  # 训练和验证数据路径
+  train_data_dir: "/repos/datasets/batch_simulation_microtubule_20251017_2048_nifti/train"
+  val_data_dir: "/repos/datasets/batch_simulation_microtubule_20251017_2048_nifti/val"
+  
+  # 高分辨率体素设置
+  voxel_size: [256, 256, 64]  # [X, Y, Z]
+  
+  # 数据加载设置（不缓存以节省内存）
+  cache_rate: 0  # 高分辨率数据不建议缓存
+  num_workers: 1
+  pin_memory: true
+  
+  # 数据增强
+  augmentation:
+    enabled: true
+    random_flip_prob: 0.5
+
+# AutoencoderKL 配置 - 针对高分辨率优化
+autoencoder:
+  # 网络架构 - 使用较小的通道数以节省显存
+  spatial_dims: 3
+  in_channels: 1
+  out_channels: 1
+  num_channels: [16, 32, 64]  # 减少通道数，从[32,64,64]降到[16,32,64]
+  latent_channels: 3
+  num_res_blocks: 1  # 可以考虑设为2以提高质量
+  norm_num_groups: 8  # 从16降到8，因为通道数减少了
+  attention_levels: [false, false, true]  # 只在最后一层使用attention
+  
+  # 训练配置
+  training:
+    n_epochs: 500
+    batch_size: 1  # 高分辨率下强烈建议batch_size=1
+    learning_rate: 1.0e-4
+    
+    # 损失权重
+    adv_weight: 0.01
+    perceptual_weight: 0.001  # 如果显存不够，可以禁用perceptual loss
+    kl_weight: 1.0e-6
+    
+    # 显存优化选项 - 全部启用
+    use_perceptual_loss: false  # 禁用感知损失以节省显存
+    use_gradient_checkpointing: true  # 启用梯度检查点
+    gradient_accumulation_steps: 4  # 使用梯度累积模拟batch_size=4
+    
+    # 对抗训练
+    autoencoder_warm_up_n_epochs: 10  # 增加warm-up epochs
+    
+    # 判别器配置 - 使用较小的判别器
+    discriminator:
+      num_layers_d: 2  # 从3减到2
+      num_channels: 16  # 从32减到16
+    
+    # 验证和保存
+    val_interval: 10
+    save_interval: 50
+    
+    # 快速开发模式
+    fast_dev_run: false
+    fast_dev_run_batches: 2
+    
+  # Checkpoint路径
+  checkpoints:
+    output_dir: "outputs/ckpt/autoencoder_high_res"
+    save_best: true
+    resume_from: null
+  
+  # 日志配置
+  logging:
+    log_dir: "outputs/logs/autoencoder_high_res"
+    log_interval: 50
+    visualize_interval: 10
+    num_visualize_samples: 2  # 减少可视化样本数量
+
+# Diffusion Model 配置
+diffusion:
+  # UNet架构
+  spatial_dims: 3
+  in_channels: 3
+  out_channels: 3
+  num_channels: [16, 32, 64]  # 减少通道数
+  attention_levels: [false, false, true]
+  num_head_channels: [0, 0, 64]  # 减少attention头
+  num_res_blocks: 1
+  
+  # 调度器配置
+  scheduler:
+    num_train_timesteps: 1000
+    schedule: "scaled_linear_beta"
+    beta_start: 0.0015
+    beta_end: 0.0195
+  
+  # 训练配置
+  training:
+    n_epochs: 500
+    batch_size: 1  # 高分辨率下使用batch_size=1
+    learning_rate: 1.0e-4
+    
+    # 验证和保存
+    val_interval: 10
+    save_interval: 50
+    
+    # 样本生成
+    generate_samples_interval: 10
+    num_samples_to_generate: 2  # 减少生成样本数
+    
+    # 快速开发模式
+    fast_dev_run: false
+    fast_dev_run_batches: 2
+  
+  # Checkpoint路径
+  checkpoints:
+    autoencoder_path: "outputs/ckpt/autoencoder_high_res/best_model.pt"
+    output_dir: "outputs/ckpt/diffusion_high_res"
+    save_best: true
+    resume_from: null
+  
+  # 日志配置
+  logging:
+    log_dir: "outputs/logs/diffusion_high_res"
+    log_interval: 20
+    visualize_interval: 10
+    num_visualize_samples: 2
+
+# 采样配置
+sampling:
+  num_inference_steps: 1000
+  num_samples: 4  # 减少生成样本数
+  
+  # 输出配置
+  output_dir: "outputs/samples/diffusion_high_res"
+  save_format: "nifti"
+  
+  # 点云转换配置
+  pointcloud:
+    num_points: 100000
+    threshold: 0.1
+    method: "probabilistic"
+
+# 设备配置
+device:
+  use_cuda: true
+  gpu_id: 0
+  mixed_precision: true  # 必须启用！
+
+# 随机种子
+seed: 42
+

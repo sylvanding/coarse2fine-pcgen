@@ -9,7 +9,8 @@ data:
   
   # 体素分辨率（训练时的目标分辨率）
   # 可以是单个整数（各向同性）或列表[X, Y, Z]（各向异性）
-  # 例如: 64 或 [64, 64, 32]
+  # 例如: 64 或 [64, 64, 32] 或 [256, 256, 64]
+  # 注意: 分辨率越大，显存占用越高，建议配合混合精度训练和梯度累积使用
   voxel_size: [64, 64, 32]  # [X, Y, Z]
   
   # 数据加载设置
@@ -29,22 +30,31 @@ autoencoder:
   spatial_dims: 3
   in_channels: 1
   out_channels: 1
+  # 注意: num_channels越大，显存占用越高
+  # 对于高分辨率（如256x256x64），建议使用较小的通道数，如[16, 32, 64]
+  # 对于低分辨率（如64x64x32），可以使用较大的通道数，如[32, 64, 64]
   num_channels: [32, 64, 64]
   latent_channels: 3
   num_res_blocks: 1
   norm_num_groups: 16
+  # attention_levels: 注意力机制非常占显存，建议只在最后一层使用
   attention_levels: [false, false, true]
   
   # 训练配置
   training:
     n_epochs: 500
-    batch_size: 2
+    batch_size: 2  # 对于256x256x64，建议batch_size=1或2
     learning_rate: 1.0e-4
     
     # 损失权重
     adv_weight: 0.01
     perceptual_weight: 0.001
     kl_weight: 1.0e-6
+    
+    # 显存优化选项
+    use_perceptual_loss: true  # 对于高分辨率，可以设为false以节省显存
+    use_gradient_checkpointing: false  # 启用梯度检查点，可节省显存但会增加训练时间
+    gradient_accumulation_steps: 1  # 梯度累积步数，增大可模拟更大的batch size
     
     # 对抗训练
     autoencoder_warm_up_n_epochs: 5  # 前N个epoch不使用对抗损失
@@ -144,7 +154,7 @@ sampling:
 device:
   use_cuda: true
   gpu_id: 0  # 使用的GPU ID
-  mixed_precision: true  # 是否使用混合精度训练
+  mixed_precision: true  # 是否使用混合精度训练（强烈建议启用，可节省约50%显存）
 
 # 随机种子
 seed: 42
