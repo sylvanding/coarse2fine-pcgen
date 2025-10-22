@@ -14,6 +14,9 @@ import nibabel as nib
 import tarfile
 import matplotlib.pyplot as plt
 import random
+from multiprocessing import Pool, cpu_count
+from functools import partial
+from typing import Tuple, Optional
 
 # 添加项目根目录到路径
 project_root = Path(__file__).parent.parent.parent
@@ -320,6 +323,71 @@ def test_single_conversion(
         raise
 
 
+def _process_single_sample(
+    args_tuple: Tuple
+) -> Tuple[bool, int, Optional[str]]:
+    """
+    处理单个点云样本的转换（用于多进程）
+    
+    Args:
+        args_tuple: 包含所有必要参数的元组
+        
+    Returns:
+        (成功标志, 样本索引, 错误信息)
+    """
+    (
+        sample_idx, h5_file_path, data_key, voxel_size, 
+        voxelization_method, sigma, volume_dims, padding,
+        is_train, output_dir, compression, nii_dtype, affine
+    ) = args_tuple
+    
+    try:
+        # 每个进程需要创建自己的加载器和转换器
+        loader = PointCloudH5Loader(h5_file_path, data_key)
+        converter = PointCloudToVoxel(
+            voxel_size=voxel_size,
+            method=voxelization_method,
+            volume_dims=volume_dims,
+            padding=padding
+        )
+        
+        # 加载点云
+        point_cloud = loader.load_single_cloud(sample_idx)
+        
+        # 转换为体素
+        if voxelization_method == 'gaussian':
+            voxel_grid = converter.convert(point_cloud, sigma=sigma)
+        else:
+            voxel_grid = converter.convert(point_cloud)
+        
+        # 归一化到[0, 255]范围
+        if voxel_grid.max() > voxel_grid.min():
+            voxel_grid = (voxel_grid - voxel_grid.min()) / (voxel_grid.max() - voxel_grid.min())
+            voxel_grid = voxel_grid * 255.0
+        
+        # 确保数据类型
+        voxel_grid = voxel_grid.astype(eval(f"np.{nii_dtype}"))
+        
+        # 创建NIfTI图像
+        nifti_img = nib.Nifti1Image(voxel_grid, affine)
+        
+        # 确定输出路径
+        extension = ".nii.gz" if compression else ".nii"
+        output_path = Path(output_dir)
+        if is_train:
+            output_file = output_path / "train" / f"voxel_{sample_idx:05d}{extension}"
+        else:
+            output_file = output_path / "val" / f"voxel_{sample_idx:05d}{extension}"
+        
+        # 保存文件
+        nib.save(nifti_img, str(output_file))
+        
+        return (True, sample_idx, None)
+        
+    except Exception as e:
+        return (False, sample_idx, str(e))
+
+
 def convert_h5_to_nifti(
     h5_file_path: str,
     output_dir: str,
@@ -331,10 +399,11 @@ def convert_h5_to_nifti(
     volume_dims: list = None,
     padding: list = None,
     compression: bool = True,
-    nii_dtype: str = 'uint8'
+    nii_dtype: str = 'uint8',
+    num_workers: int = None
 ):
     """
-    将H5点云文件转换为NIfTI体素文件
+    将H5点云文件转换为NIfTI体素文件（支持并行处理）
     
     Args:
         h5_file_path: 输入H5文件路径
@@ -347,7 +416,15 @@ def convert_h5_to_nifti(
         volume_dims: 体积尺寸 [x, y, z] (nm)
         padding: 体积边界填充 [x, y, z] (nm)
         compression: 是否使用压缩 (.nii.gz)
+        nii_dtype: NIfTI数据类型
+        num_workers: 并行进程数，None表示使用CPU核心数
     """
+    # 确定并行进程数
+    if num_workers is None:
+        num_workers = cpu_count()
+    
+    logger.info(f"使用 {num_workers} 个并行进程进行转换")
+    
     # 创建输出目录
     output_path = Path(output_dir)
     train_dir = output_path / "train"
@@ -366,23 +443,11 @@ def convert_h5_to_nifti(
     logger.info(f"体素大小: {voxel_size_str}")
     logger.info(f"体素化方法: {voxelization_method}")
     
-    # 初始化加载器和转换器
+    # 初始化加载器获取总样本数
     loader = PointCloudH5Loader(h5_file_path, data_key)
-    
-    # if volume_dims is None:
-    #     volume_dims = [20000, 20000, 2500]
-    # if padding is None:
-    #     padding = [0, 0, 100]
-    
-    converter = PointCloudToVoxel(
-        voxel_size=voxel_size,
-        method=voxelization_method,
-        volume_dims=volume_dims,
-        padding=padding
-    )
+    total_samples = loader.num_samples
     
     # 生成训练/验证集划分索引
-    total_samples = loader.num_samples
     indices = np.arange(total_samples)
     np.random.seed(42)  # 固定随机种子以保证可重复性
     np.random.shuffle(indices)
@@ -396,56 +461,56 @@ def convert_h5_to_nifti(
     # 创建仿射矩阵
     affine = create_affine_matrix(voxel_spacing=(1.0, 1.0, 1.0))
     
-    # 转换所有样本
-    extension = ".nii.gz" if compression else ".nii"
+    # 准备所有任务参数
+    task_args = []
+    for i in range(total_samples):
+        is_train = i in train_indices
+        args_tuple = (
+            i, h5_file_path, data_key, voxel_size,
+            voxelization_method, sigma, volume_dims, padding,
+            is_train, output_dir, compression, nii_dtype, affine
+        )
+        task_args.append(args_tuple)
     
+    # 使用多进程池并行处理
     train_count = 0
     val_count = 0
+    failed_samples = []
     
-    for i in tqdm(range(total_samples), desc="转换点云"):
-        try:
-            # 加载点云
-            point_cloud = loader.load_single_cloud(i)
-            
-            # 转换为体素
-            if voxelization_method == 'gaussian':
-                voxel_grid = converter.convert(point_cloud, sigma=sigma)
-            else:
-                voxel_grid = converter.convert(point_cloud)
-            
-            # 归一化到[0, 255]范围，便于ITK-SNAP显示
-            if voxel_grid.max() > voxel_grid.min():
-                voxel_grid = (voxel_grid - voxel_grid.min()) / (voxel_grid.max() - voxel_grid.min())
-                voxel_grid = voxel_grid * 255.0  # 缩放到0-255范围
-            
-            # 确保数据类型为uint8，这是ITK-SNAP推荐的格式
-            voxel_grid = voxel_grid.astype(eval(f"np.{nii_dtype}"))
-            
-            # 不添加通道维度，保持3D格式 (D, H, W)
-            # ITK-SNAP期望标准的3D医学图像格式
-            
-            # 创建NIfTI图像 - 使用3D数据而不是4D
-            nifti_img = nib.Nifti1Image(voxel_grid, affine)
-            
-            # 保存到训练集或验证集
-            if i in train_indices:
-                output_file = train_dir / f"voxel_{i:05d}{extension}"
+    logger.info("开始并行转换...")
+    
+    with Pool(processes=num_workers) as pool:
+        # 使用imap_unordered提高效率，并配合tqdm显示进度
+        results = list(tqdm(
+            pool.imap_unordered(_process_single_sample, task_args),
+            total=total_samples,
+            desc="转换点云"
+        ))
+    
+    # 统计结果
+    for success, sample_idx, error_msg in results:
+        if success:
+            if sample_idx in train_indices:
                 train_count += 1
             else:
-                output_file = val_dir / f"voxel_{i:05d}{extension}"
                 val_count += 1
-            
-            nib.save(nifti_img, str(output_file))
-            
-        except Exception as e:
-            logger.error(f"处理样本 {i} 时出错: {e}")
-            continue
+        else:
+            failed_samples.append((sample_idx, error_msg))
+            logger.error(f"处理样本 {sample_idx} 时出错: {error_msg}")
+    
+    # 报告失败样本
+    if failed_samples:
+        logger.warning(f"共有 {len(failed_samples)} 个样本处理失败")
+        for sample_idx, error_msg in failed_samples[:5]:  # 只显示前5个
+            logger.warning(f"  样本 {sample_idx}: {error_msg}")
     
     logger.info(f"转换完成!")
     logger.info(f"训练集样本数: {train_count}")
     logger.info(f"验证集样本数: {val_count}")
+    logger.info(f"成功率: {(train_count + val_count) / total_samples * 100:.1f}%")
     
     # 计算并报告文件大小统计
+    extension = ".nii.gz" if compression else ".nii"
     train_files = list(train_dir.glob(f"*{extension}"))
     if train_files:
         avg_size = np.mean([f.stat().st_size for f in train_files[:10]]) / 1024 / 1024
@@ -481,8 +546,11 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 使用示例:
-  # 完整转换并打包
+  # 完整转换并打包（使用默认并行进程数）
   python convert_h5_to_nifti.py --h5_file data.h5 --output_dir output --create_archive
+  
+  # 指定并行进程数（例如使用8个进程）
+  python convert_h5_to_nifti.py --h5_file data.h5 --output_dir output --num_workers 8
   
   # 仅测试单个样本
   python convert_h5_to_nifti.py --h5_file data.h5 --output_dir test_output --test_mode
@@ -601,6 +669,13 @@ def main():
         help='NIfTI数据类型 (默认: uint8, 可选: uint8, float32)'
     )
     
+    parser.add_argument(
+        '--num_workers',
+        type=int,
+        default=13,
+        help='并行进程数 (默认: None，自动使用CPU核心数)'
+    )
+    
     args = parser.parse_args()
     
     # 处理voxel_size参数
@@ -648,7 +723,8 @@ def main():
             volume_dims=args.volume_dims,
             padding=args.padding,
             compression=not args.no_compression,
-            nii_dtype=args.nii_dtype
+            nii_dtype=args.nii_dtype,
+            num_workers=args.num_workers
         )
         
         # 如果需要创建压缩包
