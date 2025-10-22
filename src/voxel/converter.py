@@ -6,7 +6,7 @@
 
 import numpy as np
 import tifffile
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Union, List
 import logging
 from scipy.ndimage import gaussian_filter, zoom
 
@@ -22,7 +22,9 @@ class PointCloudToVoxel:
     和后处理选项。
     
     Attributes:
-        voxel_size (int): 体素网格的分辨率（每个维度的体素数）
+        voxel_size (Union[int, List[int], Tuple[int, int, int]]): 
+            体素网格的分辨率，可以是单个整数（各向同性）或[X, Y, Z]列表（各向异性）
+        voxel_size_xyz (np.ndarray): 体素分辨率的numpy数组形式 [X, Y, Z]
         method (str): 体素化方法，'occupancy' 或 'density'
         bounds (Optional[Tuple]): 点云的边界框 ((min_x, min_y, min_z), (max_x, max_y, max_z))
         volume_dims (List[float]): 体积尺寸 [x, y, z] (单位: nm)
@@ -31,7 +33,7 @@ class PointCloudToVoxel:
     
     def __init__(
         self, 
-        voxel_size: int = 64, 
+        voxel_size: Union[int, List[int], Tuple[int, int, int]] = 64, 
         method: str = 'occupancy',
         bounds: Optional[Tuple[Tuple[float, float, float], Tuple[float, float, float]]] = None,
         padding_ratio: float = 0.1,
@@ -42,7 +44,10 @@ class PointCloudToVoxel:
         初始化体素转换器
         
         Args:
-            voxel_size (int): 体素网格分辨率，默认64x64x64
+            voxel_size (Union[int, List[int], Tuple[int, int, int]]): 
+                体素网格分辨率，可以是：
+                - 单个整数：各向同性，例如 64 表示 64x64x64
+                - 列表或元组：各向异性，例如 [64, 64, 32] 表示 X=64, Y=64, Z=32
             method (str): 体素化方法
                 - 'occupancy': 二值占有网格，有点为1，无点为0
                 - 'density': 密度网格，值代表该体素内的点数
@@ -55,8 +60,22 @@ class PointCloudToVoxel:
         Raises:
             ValueError: 当参数无效时抛出
         """
-        if voxel_size <= 0:
-            raise ValueError("体素大小必须大于0")
+        # 处理voxel_size参数，支持单个整数或[X, Y, Z]列表
+        if isinstance(voxel_size, (list, tuple)):
+            if len(voxel_size) != 3:
+                raise ValueError(f"voxel_size作为列表时必须包含3个元素[X, Y, Z]，但得到了{len(voxel_size)}个元素")
+            self.voxel_size_xyz = np.array(voxel_size, dtype=np.int32)
+            if np.any(self.voxel_size_xyz <= 0):
+                raise ValueError("体素大小的所有维度必须大于0")
+        elif isinstance(voxel_size, (int, np.integer)):
+            if voxel_size <= 0:
+                raise ValueError("体素大小必须大于0")
+            self.voxel_size_xyz = np.array([voxel_size, voxel_size, voxel_size], dtype=np.int32)
+        else:
+            raise ValueError(f"voxel_size必须是整数或包含3个整数的列表/元组，但得到了类型: {type(voxel_size)}")
+        
+        # 保留原始voxel_size用于兼容性
+        self.voxel_size = voxel_size
         
         if method not in ['occupancy', 'density', 'gaussian']:
             raise ValueError(
@@ -73,7 +92,6 @@ class PointCloudToVoxel:
         if padding is None:
             padding = [0, 0, 100]  # Padding around the volume in nm
         
-        self.voxel_size = voxel_size
         self.method = method
         self.bounds = bounds
         self.padding_ratio = padding_ratio
@@ -84,7 +102,7 @@ class PointCloudToVoxel:
         self.fixed_min_bounds = -self.padding
         self.fixed_max_bounds = self.volume_dims + self.padding
         
-        logger.info(f"初始化体素转换器: size={voxel_size}, method={method}")
+        logger.info(f"初始化体素转换器: size={self.voxel_size_xyz}, method={method}")
         logger.info(f"体积尺寸: {self.volume_dims} nm")
         logger.info(f"填充: {self.padding} nm")
         logger.info(f"固定边界: [{self.fixed_min_bounds}] - [{self.fixed_max_bounds}]")
@@ -122,12 +140,12 @@ class PointCloudToVoxel:
         """
         min_bounds, max_bounds = self._compute_bounds(point_cloud)
         
-        # 归一化到[0, voxel_size-1]
+        # 归一化到[0, voxel_size-1]，支持各向异性分辨率
         normalized_points = (point_cloud - min_bounds) / (max_bounds - min_bounds)
-        normalized_points = normalized_points * (self.voxel_size - 1)
+        normalized_points = normalized_points * (self.voxel_size_xyz - 1)
         
         # 确保点在有效范围内
-        normalized_points = np.clip(normalized_points, 0, self.voxel_size - 1)
+        normalized_points = np.clip(normalized_points, 0, self.voxel_size_xyz - 1)
         
         return normalized_points, min_bounds, max_bounds
     
@@ -139,9 +157,9 @@ class PointCloudToVoxel:
             normalized_points (np.ndarray): 归一化后的点云
         
         Returns:
-            np.ndarray: 二值体素网格，shape为(voxel_size, voxel_size, voxel_size)
+            np.ndarray: 二值体素网格，shape为(voxel_size_x, voxel_size_y, voxel_size_z)
         """
-        voxel_grid = np.zeros((self.voxel_size, self.voxel_size, self.voxel_size), dtype=np.uint8)
+        voxel_grid = np.zeros(tuple(self.voxel_size_xyz), dtype=np.uint8)
         
         # 将点坐标转换为整数索引
         voxel_indices = np.floor(normalized_points).astype(np.int32)
@@ -161,7 +179,7 @@ class PointCloudToVoxel:
         Returns:
             np.ndarray: 密度体素网格，值为该体素内的点数
         """
-        voxel_grid = np.zeros((self.voxel_size, self.voxel_size, self.voxel_size), dtype=np.float32)
+        voxel_grid = np.zeros(tuple(self.voxel_size_xyz), dtype=np.float32)
         
         # 将点坐标转换为整数索引
         voxel_indices = np.floor(normalized_points).astype(np.int32)
@@ -201,7 +219,7 @@ class PointCloudToVoxel:
                 - sigma (float): 高斯方法的标准差，默认1.0
         
         Returns:
-            np.ndarray: 体素网格，shape为(voxel_size, voxel_size, voxel_size)
+            np.ndarray: 体素网格，shape为(voxel_size_x, voxel_size_y, voxel_size_z)
         
         Raises:
             ValueError: 当点云格式不正确时抛出
@@ -213,7 +231,7 @@ class PointCloudToVoxel:
         
         if len(point_cloud) == 0:
             logger.warning("输入点云为空，返回零体素网格")
-            return np.zeros((self.voxel_size, self.voxel_size, self.voxel_size))
+            return np.zeros(tuple(self.voxel_size_xyz))
         
         # logger.info(f"开始转换点云，点数: {len(point_cloud)}")
         
@@ -319,10 +337,11 @@ class PointCloudToVoxel:
         Returns:
             np.ndarray: 采样得到的点云，shape为(M, 3)
         """
-        if voxel_grid.shape[0] != voxel_grid.shape[1] or voxel_grid.shape[0] != voxel_grid.shape[2]:
-            raise ValueError("体素网格必须是立方体")
+        # 计算每个维度的缩放因子（支持各向异性）
+        if len(voxel_grid.shape) != 3:
+            raise ValueError(f"体素网格必须是3D的，但得到shape: {voxel_grid.shape}")
         
-        scale = self.voxel_size / voxel_grid.shape[0]
+        scale = self.voxel_size_xyz / np.array(voxel_grid.shape)
         
         if method == 'probabilistic':
             return self._probabilistic_sampling(voxel_grid, threshold, num_points) * scale
@@ -669,12 +688,12 @@ class PointCloudToVoxel:
             np.ndarray: 原始坐标空间的点云
         """
         if hasattr(self, '_last_min_bounds') and hasattr(self, '_last_max_bounds'):
-            point_cloud = normalized_coords / (self.voxel_size - 1)
+            point_cloud = normalized_coords / (self.voxel_size_xyz - 1)
             point_cloud = point_cloud * (self._last_max_bounds - self._last_min_bounds)
             point_cloud += self._last_min_bounds
         else:
             logger.warning("没有保存的边界信息，返回归一化坐标")
-            point_cloud = normalized_coords / self.voxel_size
+            point_cloud = normalized_coords / self.voxel_size_xyz
         
         return point_cloud
     

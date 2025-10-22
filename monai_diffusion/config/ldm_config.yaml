@@ -8,7 +8,9 @@ data:
   val_data_dir: "data/voxels_nifti/val"
   
   # 体素分辨率（训练时的目标分辨率）
-  voxel_size: 64
+  # 可以是单个整数（各向同性）或列表[X, Y, Z]（各向异性）
+  # 例如: 64 或 [64, 64, 32]
+  voxel_size: [64, 64, 64]  # [X, Y, Z]
   
   # 数据加载设置
   cache_rate: 0.25  # 缓存比例，0表示不缓存，1表示全部缓存

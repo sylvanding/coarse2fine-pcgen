@@ -32,7 +32,7 @@ class VoxelNiftiDataset:
     def __init__(
         self,
         data_dir: str,
-        target_voxel_size: int = 64,
+        target_voxel_size = 64,
         normalize_to_minus_one_one: bool = True,
         cache_rate: float = 0.0,
         augmentation: bool = False,
@@ -43,14 +43,22 @@ class VoxelNiftiDataset:
         
         Args:
             data_dir: NIfTI文件目录
-            target_voxel_size: 目标体素分辨率
+            target_voxel_size: 目标体素分辨率，可以是整数（各向同性）或[X, Y, Z]列表（各向异性）
             normalize_to_minus_one_one: 是否归一化到[-1, 1]
             cache_rate: 缓存比例 (0-1)
             augmentation: 是否启用数据增强
             augmentation_config: 数据增强配置
         """
         self.data_dir = Path(data_dir)
-        self.target_voxel_size = target_voxel_size
+        
+        # 处理target_voxel_size，支持整数或列表
+        if isinstance(target_voxel_size, (list, tuple)):
+            if len(target_voxel_size) != 3:
+                raise ValueError(f"target_voxel_size作为列表时必须包含3个元素[X, Y, Z]，但得到了{len(target_voxel_size)}个元素")
+            self.target_voxel_size = tuple(target_voxel_size)
+        else:
+            self.target_voxel_size = (target_voxel_size, target_voxel_size, target_voxel_size)
+        
         self.normalize_to_minus_one_one = normalize_to_minus_one_one
         self.cache_rate = cache_rate
         self.augmentation = augmentation
@@ -68,7 +76,7 @@ class VoxelNiftiDataset:
         logger.info(f"初始化NIfTI数据集:")
         logger.info(f"  数据目录: {data_dir}")
         logger.info(f"  样本数量: {len(self.nifti_files)}")
-        logger.info(f"  目标体素大小: {target_voxel_size}^3")
+        logger.info(f"  目标体素大小: {self.target_voxel_size[0]}x{self.target_voxel_size[1]}x{self.target_voxel_size[2]}")
         logger.info(f"  缓存比例: {cache_rate}")
         logger.info(f"  数据增强: {augmentation}")
         
@@ -125,10 +133,10 @@ class VoxelNiftiDataset:
                 mode="bilinear"
             ),
             
-            # 调整到目标体素大小
+            # 调整到目标体素大小（支持各向异性）
             transforms.Resized(
                 keys=["image"],
-                spatial_size=(self.target_voxel_size, self.target_voxel_size, self.target_voxel_size),
+                spatial_size=self.target_voxel_size,
                 mode="trilinear"
             ),
         ]
@@ -219,7 +227,15 @@ def create_train_val_dataloaders(
     train_dir = train_data_dir or data_config['train_data_dir']
     val_dir = val_data_dir or data_config['val_data_dir']
     
+    # 处理voxel_size，支持整数或列表
     voxel_size = data_config['voxel_size']
+    if isinstance(voxel_size, (list, tuple)):
+        if len(voxel_size) != 3:
+            raise ValueError(f"voxel_size作为列表时必须包含3个元素[X, Y, Z]，但得到了{len(voxel_size)}个元素")
+        voxel_size_tuple = tuple(voxel_size)
+    else:
+        voxel_size_tuple = voxel_size
+    
     cache_rate = data_config.get('cache_rate', 0.0)
     num_workers = data_config.get('num_workers', 4)
     pin_memory = data_config.get('pin_memory', True)
@@ -240,7 +256,7 @@ def create_train_val_dataloaders(
     # 创建训练数据集（启用数据增强）
     train_dataset = VoxelNiftiDataset(
         data_dir=train_dir,
-        target_voxel_size=voxel_size,
+        target_voxel_size=voxel_size_tuple,
         normalize_to_minus_one_one=True,
         cache_rate=cache_rate,
         augmentation=augmentation_enabled,
@@ -250,7 +266,7 @@ def create_train_val_dataloaders(
     # 创建验证数据集（不使用数据增强）
     val_dataset = VoxelNiftiDataset(
         data_dir=val_dir,
-        target_voxel_size=voxel_size,
+        target_voxel_size=voxel_size_tuple,
         normalize_to_minus_one_one=True,
         cache_rate=cache_rate,
         augmentation=False
