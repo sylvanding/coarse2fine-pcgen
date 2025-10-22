@@ -1,0 +1,592 @@
+---
+globs: monai_diffusion/**/*.py
+description: monai_diffusion文件夹下调用MONAI Generative库的集成规范
+---
+
+# MONAI Generative 集成规范
+
+本规则适用于 [monai_diffusion/](mdc:monai_diffusion/) 文件夹，规范如何在该目录下正确使用 [GenerativeModels/](mdc:GenerativeModels/) 库。
+
+## 路径设置规范
+
+### 标准导入模式
+
+在 `monai_diffusion/` 下的任何Python文件中，使用以下模式导入generative库：
+
+```python
+"""
+3D点云扩散模型训练脚本
+
+使用MONAI Generative Models库实现体素扩散模型。
+"""
+
+import sys
+from pathlib import Path
+
+# ========== 路径设置 ==========
+# 获取项目根目录
+script_dir = Path(__file__).parent
+project_root = script_dir.parent  # /repos/coarse2fine-pcgen
+
+# 添加GenerativeModels到Python路径
+generative_models_path = project_root / "GenerativeModels"
+if str(generative_models_path) not in sys.path:
+    sys.path.insert(0, str(generative_models_path))
+
+# ========== 标准库导入 ==========
+import os
+import logging
+from typing import Optional, Tuple, Dict, Any
+
+# ========== 第三方库导入 ==========
+import torch
+import torch.nn.functional as F
+from torch.cuda.amp import GradScaler, autocast
+import numpy as np
+from tqdm import tqdm
+
+# ========== MONAI Generative导入 ==========
+from generative.inferers import DiffusionInferer
+from generative.networks.nets import DiffusionModelUNet
+from generative.networks.schedulers import DDPMScheduler, DDIMScheduler
+
+# ========== 项目内部导入 ==========
+# 导入体素转换和数据加载模块
+sys.path.insert(0, str(project_root))
+from src.data.h5_loader import PointCloudH5Loader
+from src.voxel.converter import PointCloudToVoxel
+
+# 配置日志
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+```
+
+**关键点**:
+1. 先添加 `GenerativeModels` 到路径，再导入generative模块
+2. 使用 `Path(__file__).parent` 获取当前脚本目录
+3. 确保项目根目录也在路径中，以便导入 `src` 下的模块
+
+## 数据流集成
+
+### 点云 → 体素 → 扩散模型
+
+完整的数据处理流程：
+
+```python
+class VoxelDiffusionPipeline:
+    """
+    点云到体素扩散模型的完整流程
+    
+    整合了点云加载、体素转换和扩散模型训练/采样。
+    
+    Attributes:
+        voxel_size (int): 体素网格分辨率
+        voxel_method (str): 体素化方法
+        diffusion_model (DiffusionModelUNet): 扩散模型
+        scheduler (DDPMScheduler): 噪声调度器
+        inferer (DiffusionInferer): 扩散推理器
+    """
+    
+    def __init__(
+        self, 
+        voxel_size: int = 64,
+        voxel_method: str = 'occupancy',
+        model_channels: Tuple[int, ...] = (64, 128, 256),
+        device: str = 'cuda'
+    ):
+        self.voxel_size = voxel_size
+        self.voxel_method = voxel_method
+        self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
+        
+        # 初始化体素转换器
+        self.voxel_converter = PointCloudToVoxel(
+            voxel_size=voxel_size,
+            method=voxel_method
+        )
+        
+        # 初始化扩散模型
+        self.diffusion_model = DiffusionModelUNet(
+            spatial_dims=3,
+            in_channels=1,
+            out_channels=1,
+            num_channels=model_channels,
+            attention_levels=(False, True, True),
+            num_res_blocks=2,
+            num_head_channels=32,
+        ).to(self.device)
+        
+        # 初始化调度器
+        self.scheduler = DDPMScheduler(
+            num_train_timesteps=1000,
+            schedule="linear_beta",
+            prediction_type="epsilon",
+        )
+        
+        # 初始化推理器
+        self.inferer = DiffusionInferer(scheduler=self.scheduler)
+        
+        logger.info(f"初始化VoxelDiffusionPipeline: voxel_size={voxel_size}, device={self.device}")
+    
+    def point_cloud_to_voxel_batch(
+        self, 
+        point_clouds: np.ndarray
+    ) -> torch.Tensor:
+        """
+        批量转换点云到体素网格
+        
+        Args:
+            point_clouds (np.ndarray): 形状为(batch_size, num_points, 3)的点云数据
+            
+        Returns:
+            torch.Tensor: 形状为(batch_size, 1, voxel_size, voxel_size, voxel_size)的体素张量
+        """
+        batch_size = point_clouds.shape[0]
+        voxel_grids = []
+        
+        for i in range(batch_size):
+            # 转换单个点云
+            voxel_grid = self.voxel_converter.convert(point_clouds[i])
+            voxel_grids.append(voxel_grid)
+        
+        # 堆叠为批次并转换为张量
+        voxel_batch = np.stack(voxel_grids, axis=0)
+        voxel_batch = voxel_batch[:, np.newaxis, ...]  # 添加通道维度
+        
+        return torch.from_numpy(voxel_batch).float().to(self.device)
+    
+    def train_step(
+        self, 
+        voxel_batch: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        单个训练步骤
+        
+        Args:
+            voxel_batch (torch.Tensor): 体素批次 (B, 1, D, H, W)
+            
+        Returns:
+            torch.Tensor: 损失值
+        """
+        # 生成随机噪声和时间步
+        noise = torch.randn_like(voxel_batch)
+        timesteps = torch.randint(
+            0, 
+            self.scheduler.num_train_timesteps,
+            (voxel_batch.shape[0],),
+            device=self.device
+        )
+        
+        # 前向传播
+        noise_pred = self.inferer(
+            inputs=voxel_batch,
+            diffusion_model=self.diffusion_model,
+            noise=noise,
+            timesteps=timesteps,
+        )
+        
+        # 计算MSE损失
+        loss = F.mse_loss(noise_pred, noise)
+        
+        return loss
+    
+    def sample_voxels(
+        self, 
+        num_samples: int = 16,
+        num_inference_steps: int = 50,
+        use_ddim: bool = True
+    ) -> torch.Tensor:
+        """
+        生成体素样本
+        
+        Args:
+            num_samples (int): 生成样本数量
+            num_inference_steps (int): 推理步数
+            use_ddim (bool): 是否使用DDIM调度器
+            
+        Returns:
+            torch.Tensor: 生成的体素网格 (num_samples, 1, D, H, W)
+        """
+        self.diffusion_model.eval()
+        
+        # 选择调度器
+        if use_ddim:
+            scheduler = DDIMScheduler(
+                num_train_timesteps=1000,
+                schedule="linear_beta",
+            )
+        else:
+            scheduler = self.scheduler
+        
+        scheduler.set_timesteps(num_inference_steps=num_inference_steps)
+        
+        # 生成随机噪声
+        noise = torch.randn(
+            (num_samples, 1, self.voxel_size, self.voxel_size, self.voxel_size)
+        ).to(self.device)
+        
+        # 采样
+        with torch.no_grad():
+            synthetic_voxels = self.inferer.sample(
+                input_noise=noise,
+                diffusion_model=self.diffusion_model,
+                scheduler=scheduler,
+                verbose=True,
+            )
+        
+        return synthetic_voxels
+    
+    def voxel_to_point_cloud(
+        self, 
+        voxel_grid: np.ndarray,
+        num_points: int = 2048,
+        threshold: float = 0.5
+    ) -> np.ndarray:
+        """
+        从体素网格采样点云
+        
+        Args:
+            voxel_grid (np.ndarray): 体素网格 (D, H, W)
+            num_points (int): 目标点数
+            threshold (float): 占有阈值
+            
+        Returns:
+            np.ndarray: 点云 (num_points, 3)
+        """
+        # 找到占有的体素
+        occupied = voxel_grid > threshold
+        occupied_indices = np.argwhere(occupied)
+        
+        if len(occupied_indices) == 0:
+            logger.warning("体素网格为空，返回随机点云")
+            return np.random.rand(num_points, 3)
+        
+        # 随机采样
+        if len(occupied_indices) >= num_points:
+            sampled_indices = occupied_indices[
+                np.random.choice(len(occupied_indices), num_points, replace=False)
+            ]
+        else:
+            # 如果点不够，进行重复采样
+            sampled_indices = occupied_indices[
+                np.random.choice(len(occupied_indices), num_points, replace=True)
+            ]
+        
+        # 标准化到[0, 1]
+        point_cloud = sampled_indices.astype(np.float32) / (self.voxel_size - 1)
+        
+        # 添加随机抖动（亚体素精度）
+        jitter = np.random.rand(*point_cloud.shape) / self.voxel_size
+        point_cloud += jitter
+        
+        return point_cloud
+```
+
+### 训练脚本示例
+
+```python
+def train_voxel_diffusion(
+    h5_file_path: str,
+    output_dir: str,
+    voxel_size: int = 64,
+    batch_size: int = 8,
+    num_epochs: int = 100,
+    learning_rate: float = 2.5e-5,
+):
+    """
+    训练体素扩散模型的主函数
+    
+    Args:
+        h5_file_path (str): 点云H5文件路径
+        output_dir (str): 输出目录
+        voxel_size (int): 体素分辨率
+        batch_size (int): 批次大小
+        num_epochs (int): 训练轮数
+        learning_rate (float): 学习率
+    """
+    # 创建输出目录
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # ========== 1. 初始化流程 ==========
+    pipeline = VoxelDiffusionPipeline(
+        voxel_size=voxel_size,
+        voxel_method='occupancy',
+        model_channels=(64, 128, 256),
+    )
+    
+    # ========== 2. 加载数据 ==========
+    logger.info(f"加载点云数据: {h5_file_path}")
+    h5_loader = PointCloudH5Loader(h5_file_path)
+    point_clouds = h5_loader.load_all()  # (N, num_points, 3)
+    
+    num_samples = len(point_clouds)
+    logger.info(f"加载了 {num_samples} 个点云样本")
+    
+    # ========== 3. 预处理：转换为体素 ==========
+    logger.info("预处理：将点云转换为体素网格...")
+    all_voxels = []
+    
+    for i in tqdm(range(0, num_samples, batch_size), desc="体素化"):
+        end_idx = min(i + batch_size, num_samples)
+        batch_pc = point_clouds[i:end_idx]
+        voxel_batch = pipeline.point_cloud_to_voxel_batch(batch_pc)
+        all_voxels.append(voxel_batch.cpu())
+    
+    all_voxels = torch.cat(all_voxels, dim=0)
+    logger.info(f"体素数据形状: {all_voxels.shape}")
+    
+    # 创建DataLoader
+    dataset = torch.utils.data.TensorDataset(all_voxels)
+    train_loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=4,
+    )
+    
+    # ========== 4. 训练设置 ==========
+    optimizer = torch.optim.Adam(
+        pipeline.diffusion_model.parameters(),
+        lr=learning_rate
+    )
+    scaler = GradScaler()
+    
+    # ========== 5. 训练循环 ==========
+    pipeline.diffusion_model.train()
+    
+    for epoch in range(num_epochs):
+        epoch_loss = 0.0
+        
+        with tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}") as pbar:
+            for batch_idx, (voxel_batch,) in enumerate(pbar):
+                voxel_batch = voxel_batch.to(pipeline.device)
+                
+                optimizer.zero_grad()
+                
+                # 混合精度训练
+                with autocast(enabled=True):
+                    loss = pipeline.train_step(voxel_batch)
+                
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+                
+                epoch_loss += loss.item()
+                pbar.set_postfix({'loss': f'{loss.item():.4f}'})
+        
+        avg_loss = epoch_loss / len(train_loader)
+        logger.info(f"Epoch {epoch+1} 平均损失: {avg_loss:.4f}")
+        
+        # ========== 6. 定期保存和采样 ==========
+        if (epoch + 1) % 10 == 0:
+            # 保存模型
+            checkpoint_path = os.path.join(
+                output_dir, 
+                f"diffusion_epoch_{epoch+1}.pth"
+            )
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': pipeline.diffusion_model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': avg_loss,
+            }, checkpoint_path)
+            logger.info(f"保存检查点: {checkpoint_path}")
+            
+            # 生成样本
+            logger.info("生成样本...")
+            synthetic_voxels = pipeline.sample_voxels(
+                num_samples=16,
+                num_inference_steps=50,
+                use_ddim=True
+            )
+            
+            # 保存样本
+            sample_path = os.path.join(
+                output_dir,
+                f"samples_epoch_{epoch+1}.npz"
+            )
+            np.savez_compressed(
+                sample_path,
+                voxels=synthetic_voxels.cpu().numpy()
+            )
+            logger.info(f"保存样本: {sample_path}")
+
+if __name__ == "__main__":
+    train_voxel_diffusion(
+        h5_file_path="data/point_clouds.h5",
+        output_dir="outputs/voxel_diffusion",
+        voxel_size=64,
+        batch_size=8,
+        num_epochs=100,
+        learning_rate=2.5e-5,
+    )
+```
+
+## 配置文件规范
+
+使用YAML配置文件管理超参数：
+
+```yaml
+# monai_diffusion/configs/train_config.yaml
+
+# 数据配置
+data:
+  h5_file_path: "data/point_clouds.h5"
+  data_key: "data"
+  num_points: 2048
+
+# 体素配置
+voxel:
+  voxel_size: 64
+  method: "occupancy"  # "occupancy", "density", "gaussian_density"
+  
+# 模型配置
+model:
+  spatial_dims: 3
+  in_channels: 1
+  out_channels: 1
+  num_channels: [64, 128, 256]
+  attention_levels: [false, true, true]
+  num_res_blocks: 2
+  num_head_channels: 32
+  
+# 调度器配置
+scheduler:
+  type: "DDPM"  # "DDPM", "DDIM", "PNDM"
+  num_train_timesteps: 1000
+  schedule: "linear_beta"  # "linear_beta", "scaled_linear_beta"
+  prediction_type: "epsilon"  # "epsilon", "v_prediction", "sample"
+  
+# 训练配置
+training:
+  batch_size: 8
+  num_epochs: 100
+  learning_rate: 2.5e-5
+  use_amp: true  # 混合精度训练
+  gradient_accumulation_steps: 1
+  
+# 采样配置
+sampling:
+  num_inference_steps: 50
+  use_ddim: true
+  save_intermediates: false
+  
+# 输出配置
+output:
+  output_dir: "outputs/voxel_diffusion"
+  checkpoint_interval: 10
+  sample_interval: 10
+```
+
+加载配置：
+
+```python
+import yaml
+
+def load_config(config_path: str) -> Dict[str, Any]:
+    """加载YAML配置文件"""
+    with open(config_path, 'r', encoding='utf-8') as f:
+        config = yaml.safe_load(f)
+    return config
+
+# 使用配置
+config = load_config("monai_diffusion/configs/train_config.yaml")
+
+pipeline = VoxelDiffusionPipeline(
+    voxel_size=config['voxel']['voxel_size'],
+    voxel_method=config['voxel']['method'],
+    model_channels=tuple(config['model']['num_channels']),
+)
+```
+
+## 日志和监控规范
+
+### 使用TensorBoard
+
+```python
+from torch.utils.tensorboard import SummaryWriter
+
+# 初始化writer
+writer = SummaryWriter(log_dir=os.path.join(output_dir, "logs"))
+
+# 训练循环中记录
+for epoch in range(num_epochs):
+    for batch_idx, voxel_batch in enumerate(train_loader):
+        loss = pipeline.train_step(voxel_batch)
+        
+        # 记录损失
+        global_step = epoch * len(train_loader) + batch_idx
+        writer.add_scalar('Loss/train', loss.item(), global_step)
+        
+        # 记录学习率
+        writer.add_scalar('Learning_rate', optimizer.param_groups[0]['lr'], global_step)
+    
+    # 每个epoch结束后记录样本
+    if (epoch + 1) % 10 == 0:
+        synthetic_voxels = pipeline.sample_voxels(num_samples=4)
+        
+        # 记录体素切片图像
+        for i in range(4):
+            voxel_slice = synthetic_voxels[i, 0, :, :, voxel_size // 2].cpu().numpy()
+            writer.add_image(f'Samples/sample_{i}', voxel_slice[np.newaxis], epoch)
+
+writer.close()
+```
+
+## 错误处理和日志规范
+
+```python
+import logging
+import traceback
+
+logger = logging.getLogger(__name__)
+
+try:
+    # 训练代码
+    train_voxel_diffusion(...)
+    
+except FileNotFoundError as e:
+    logger.error(f"文件未找到: {e}")
+    logger.error("请检查数据路径是否正确")
+    
+except torch.cuda.OutOfMemoryError as e:
+    logger.error("GPU显存不足")
+    logger.error("建议: 1) 减小batch_size 2) 减小voxel_size 3) 使用潜在扩散模型")
+    
+except Exception as e:
+    logger.error(f"训练过程中发生错误: {e}")
+    logger.error(traceback.format_exc())
+    
+finally:
+    # 清理资源
+    torch.cuda.empty_cache()
+    logger.info("训练结束，已清理GPU缓存")
+```
+
+## 最佳实践总结
+
+### ✅ 推荐做法
+
+1. **模块化设计**: 使用Pipeline类封装完整流程
+2. **配置管理**: 使用YAML文件管理超参数
+3. **混合精度**: 使用AMP加速训练并节省显存
+4. **定期保存**: 每N个epoch保存检查点和样本
+5. **日志记录**: 使用TensorBoard监控训练
+6. **错误处理**: 捕获常见错误并给出解决建议
+
+### ❌ 避免做法
+
+1. 不要直接修改 `GenerativeModels/` 下的代码
+2. 不要在训练循环中频繁采样（耗时且占用显存）
+3. 不要忘记调用 `model.train()` 和 `model.eval()`
+4. 不要在采样时忘记 `torch.no_grad()`
+5. 不要使用过大的batch_size导致OOM
+
+## 参考项目脚本
+
+可参考以下现有脚本的模式：
+
+- [scripts/3d_diffusion/train_diffusion.py](mdc:scripts/3d_diffusion/train_diffusion.py): 3D扩散模型训练
+- [scripts/3d_diffusion/generate_samples.py](mdc:scripts/3d_diffusion/generate_samples.py): 样本生成
+- [scripts/test_conversion/test_conversion.py](mdc:scripts/test_conversion/test_conversion.py): 体素转换测试
+
+遵循这些规范，确保 `monai_diffusion/` 文件夹下的代码与项目其他部分保持一致。

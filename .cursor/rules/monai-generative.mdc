@@ -1,0 +1,629 @@
+---
+description: MONAI Generative Models库使用指南和API参考
+---
+
+# MONAI Generative Models 使用指南
+
+本项目使用 [MONAI Generative Models](https://github.com/Project-MONAI/GenerativeModels) 库实现3D点云的扩散模型生成。该库位于 [GenerativeModels/](mdc:GenerativeModels/) 目录下。
+
+## 库简介
+
+MONAI Generative Models 是专为医学图像设计的生成式模型库，支持2D和3D数据。核心功能包括：
+
+- **网络架构**: Diffusion Model UNet, AutoencoderKL, VQ-VAE, Transformer, Discriminator
+- **扩散调度器**: DDPM, DDIM, PNDM
+- **推理器**: DiffusionInferer, LatentDiffusionInferer, VQVAETransformerInferer
+- **损失函数**: 对抗损失、感知损失、频谱损失
+- **评估指标**: MS-SSIM, FID
+
+## 核心模块结构
+
+### 1. 网络模块 (`generative.networks`)
+
+#### 扩散模型网络
+
+```python
+from generative.networks.nets import DiffusionModelUNet
+
+# 3D扩散模型UNet (适用于点云体素数据)
+unet = DiffusionModelUNet(
+    spatial_dims=3,              # 3D数据
+    in_channels=1,               # 输入通道数（例如：占有网格）
+    out_channels=1,              # 输出通道数
+    num_channels=(64, 128, 256), # 各层通道数
+    attention_levels=(False, True, True),  # 是否使用注意力机制
+    num_res_blocks=2,            # 残差块数量
+    num_head_channels=32,        # 注意力头通道数
+)
+
+# 条件生成（带上下文）
+# context: 条件嵌入 (batch_size, context_dim)
+output = unet(
+    x=noisy_voxel,              # 加噪后的体素网格
+    timesteps=timesteps,         # 时间步
+    context=condition_embedding  # 可选的条件信息
+)
+```
+
+**关键参数说明**:
+- `spatial_dims`: 2D图像用2，3D体素用3
+- `num_channels`: 控制模型容量，越大越强但越慢
+- `attention_levels`: 注意力机制占用显存，建议只在深层使用
+- `num_res_blocks`: 增加可提升性能但增加计算量
+
+#### 自编码器网络
+
+```python
+from generative.networks.nets import AutoencoderKL
+
+# Autoencoder-KL (用于潜在扩散模型)
+autoencoder = AutoencoderKL(
+    spatial_dims=3,
+    in_channels=1,
+    out_channels=1,
+    num_channels=(64, 128, 256),
+    latent_channels=8,           # 潜在空间维度
+    num_res_blocks=2,
+    attention_levels=(False, False, True),
+)
+
+# 编码到潜在空间
+z_mu, z_sigma = autoencoder.encode(voxel_grid)
+z = autoencoder.sampling(z_mu, z_sigma)
+
+# 从潜在空间解码
+reconstructed = autoencoder.decode(z)
+```
+
+### 2. 调度器模块 (`generative.networks.schedulers`)
+
+#### DDPM调度器（标准扩散）
+
+```python
+from generative.networks.schedulers import DDPMScheduler
+
+scheduler = DDPMScheduler(
+    num_train_timesteps=1000,    # 训练时的扩散步数
+    schedule="linear_beta",      # beta调度: "linear_beta", "scaled_linear_beta"
+    prediction_type="epsilon",   # 预测类型: "epsilon", "v_prediction", "sample"
+    clip_sample=True,            # 是否裁剪样本到[-1, 1]
+)
+
+# 训练时添加噪声
+noise = torch.randn_like(voxel_grid)
+timesteps = torch.randint(0, scheduler.num_train_timesteps, (batch_size,))
+noisy_voxel = scheduler.add_noise(
+    original_samples=voxel_grid,
+    noise=noise,
+    timesteps=timesteps
+)
+
+# 推理时设置时间步
+scheduler.set_timesteps(num_inference_steps=50)  # 推理用50步
+```
+
+**预测类型说明**:
+- `epsilon`: 预测添加的噪声（最常用）
+- `v_prediction`: 速度预测（Imagen论文）
+- `sample`: 直接预测去噪后的样本
+
+#### DDIM调度器（快速采样）
+
+```python
+from generative.networks.schedulers import DDIMScheduler
+
+# DDIM允许更少步数的采样
+ddim_scheduler = DDIMScheduler(
+    num_train_timesteps=1000,
+    schedule="scaled_linear_beta",
+    clip_sample=False,
+)
+
+# 推理时可以使用很少的步数
+ddim_scheduler.set_timesteps(num_inference_steps=20)  # 仅20步
+```
+
+**DDIM优势**: 可以用更少的推理步数（20-50步）达到DDPM 1000步的效果。
+
+#### PNDM调度器（伪数值方法）
+
+```python
+from generative.networks.schedulers import PNDMScheduler
+
+pndm_scheduler = PNDMScheduler(
+    num_train_timesteps=1000,
+    schedule="scaled_linear_beta",
+)
+```
+
+### 3. 推理器模块 (`generative.inferers`)
+
+#### DiffusionInferer（核心推理器）
+
+```python
+from generative.inferers import DiffusionInferer
+
+inferer = DiffusionInferer(scheduler=scheduler)
+
+# ========== 训练阶段 ==========
+# 前向传播（计算损失）
+noise_pred = inferer(
+    inputs=voxel_grid,           # 真实数据
+    diffusion_model=unet,        # 扩散模型
+    noise=noise,                 # 随机噪声
+    timesteps=timesteps,         # 时间步
+    condition=condition_emb,     # 可选条件
+    mode="crossattn",           # "crossattn" 或 "concat"
+)
+
+# 计算损失（epsilon预测）
+loss = F.mse_loss(noise_pred, noise)
+
+# ========== 采样阶段 ==========
+# 从随机噪声生成样本
+with torch.no_grad():
+    synthetic_voxel = inferer.sample(
+        input_noise=torch.randn((batch_size, 1, 32, 32, 32)),
+        diffusion_model=unet,
+        scheduler=scheduler,        # 可以使用不同的调度器
+        save_intermediates=True,    # 是否保存中间步骤
+        intermediate_steps=10,       # 保存的中间步骤间隔
+        conditioning=condition_emb,  # 条件生成
+        verbose=True,                # 显示进度条
+    )
+```
+
+**条件生成模式**:
+- `mode="crossattn"`: 使用交叉注意力机制融合条件（推荐）
+- `mode="concat"`: 直接拼接条件到输入通道
+
+#### LatentDiffusionInferer（潜在扩散）
+
+```python
+from generative.inferers import LatentDiffusionInferer
+
+# 潜在扩散模型（节省显存和计算）
+latent_inferer = LatentDiffusionInferer(
+    scheduler=scheduler,
+    scale_factor=1.0,  # 潜在空间缩放因子
+)
+
+# 训练（在潜在空间）
+with torch.no_grad():
+    z_mu, z_sigma = autoencoder.encode(voxel_grid)
+    z = autoencoder.sampling(z_mu, z_sigma)
+
+noise_pred = latent_inferer(
+    inputs=z,
+    diffusion_model=unet,
+    noise=noise,
+    timesteps=timesteps,
+)
+
+# 采样
+with torch.no_grad():
+    latent_samples = latent_inferer.sample(...)
+    voxel_samples = autoencoder.decode(latent_samples)
+```
+
+### 4. 损失函数模块 (`generative.losses`)
+
+```python
+from generative.losses import PatchAdversarialLoss, PerceptualLoss
+
+# GAN判别器损失
+adversarial_loss = PatchAdversarialLoss(
+    criterion="least_squares"  # "hinge", "least_squares"
+)
+
+# 感知损失（使用预训练特征）
+perceptual_loss = PerceptualLoss(
+    spatial_dims=3,
+    network_type="radimagenet_resnet50",  # 3D医学图像特征
+)
+```
+
+## 典型使用流程
+
+### 场景1: 3D体素无条件生成
+
+```python
+import sys
+from pathlib import Path
+
+# 添加GenerativeModels到路径
+sys.path.insert(0, str(Path(__file__).parent.parent / "GenerativeModels"))
+
+import torch
+import torch.nn.functional as F
+from torch.cuda.amp import GradScaler, autocast
+
+from generative.inferers import DiffusionInferer
+from generative.networks.nets import DiffusionModelUNet
+from generative.networks.schedulers import DDPMScheduler
+
+# ========== 1. 初始化模型 ==========
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+unet = DiffusionModelUNet(
+    spatial_dims=3,
+    in_channels=1,
+    out_channels=1,
+    num_channels=(64, 128, 256),
+    attention_levels=(False, True, True),
+    num_res_blocks=2,
+    num_head_channels=32,
+).to(device)
+
+scheduler = DDPMScheduler(
+    num_train_timesteps=1000,
+    schedule="linear_beta",
+    prediction_type="epsilon",
+)
+
+inferer = DiffusionInferer(scheduler=scheduler)
+
+# ========== 2. 训练循环 ==========
+optimizer = torch.optim.Adam(unet.parameters(), lr=2.5e-5)
+scaler = GradScaler()
+
+for epoch in range(num_epochs):
+    for batch in train_loader:
+        voxel_grid = batch["voxel"].to(device)  # (B, 1, 64, 64, 64)
+        
+        optimizer.zero_grad()
+        
+        with autocast(enabled=True):
+            # 随机时间步和噪声
+            noise = torch.randn_like(voxel_grid)
+            timesteps = torch.randint(
+                0, scheduler.num_train_timesteps, 
+                (voxel_grid.shape[0],), 
+                device=device
+            )
+            
+            # 前向传播
+            noise_pred = inferer(
+                inputs=voxel_grid,
+                diffusion_model=unet,
+                noise=noise,
+                timesteps=timesteps,
+            )
+            
+            # 计算损失
+            loss = F.mse_loss(noise_pred, noise)
+        
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+
+# ========== 3. 采样生成 ==========
+unet.eval()
+scheduler.set_timesteps(num_inference_steps=50)
+
+with torch.no_grad():
+    # 生成16个样本
+    noise = torch.randn((16, 1, 64, 64, 64)).to(device)
+    
+    synthetic_voxels = inferer.sample(
+        input_noise=noise,
+        diffusion_model=unet,
+        scheduler=scheduler,
+        verbose=True,
+    )
+    
+    # synthetic_voxels: (16, 1, 64, 64, 64)
+```
+
+### 场景2: 条件生成（类别引导）
+
+```python
+# ========== 1. 带类别嵌入的模型 ==========
+num_classes = 10
+
+# 时间步嵌入 + 类别嵌入
+class ConditionalUNet(torch.nn.Module):
+    def __init__(self, num_classes):
+        super().__init__()
+        self.unet = DiffusionModelUNet(
+            spatial_dims=3,
+            in_channels=1,
+            out_channels=1,
+            num_channels=(64, 128, 256),
+            attention_levels=(False, True, True),
+            num_res_blocks=2,
+            num_head_channels=32,
+            cross_attention_dim=128,  # 条件嵌入维度
+        )
+        self.class_embedding = torch.nn.Embedding(num_classes, 128)
+    
+    def forward(self, x, timesteps, class_labels):
+        class_emb = self.class_embedding(class_labels)  # (B, 128)
+        return self.unet(x=x, timesteps=timesteps, context=class_emb)
+
+model = ConditionalUNet(num_classes=num_classes).to(device)
+
+# ========== 2. 条件训练 ==========
+for batch in train_loader:
+    voxel_grid = batch["voxel"].to(device)
+    class_labels = batch["label"].to(device)  # (B,)
+    
+    noise = torch.randn_like(voxel_grid)
+    timesteps = torch.randint(0, 1000, (voxel_grid.shape[0],), device=device)
+    
+    # 使用inferer的条件模式
+    noise_pred = inferer(
+        inputs=voxel_grid,
+        diffusion_model=lambda x, timesteps: model(x, timesteps, class_labels),
+        noise=noise,
+        timesteps=timesteps,
+        condition=None,  # 条件已在model内部处理
+    )
+    
+    loss = F.mse_loss(noise_pred, noise)
+    loss.backward()
+    optimizer.step()
+
+# ========== 3. 条件采样 ==========
+target_class = 5  # 生成第5类的样本
+class_labels = torch.full((16,), target_class, device=device)
+
+synthetic = inferer.sample(
+    input_noise=torch.randn((16, 1, 64, 64, 64)).to(device),
+    diffusion_model=lambda x, timesteps: model(x, timesteps, class_labels),
+    scheduler=scheduler,
+)
+```
+
+### 场景3: 潜在扩散模型（节省显存）
+
+```python
+from generative.networks.nets import AutoencoderKL
+from generative.inferers import LatentDiffusionInferer
+
+# ========== 1. 先训练自编码器 ==========
+autoencoder = AutoencoderKL(
+    spatial_dims=3,
+    in_channels=1,
+    out_channels=1,
+    num_channels=(64, 128, 256),
+    latent_channels=8,
+    num_res_blocks=2,
+).to(device)
+
+# ... 训练autoencoder的代码（重建损失 + KL散度）
+
+# ========== 2. 在潜在空间训练扩散模型 ==========
+# 潜在空间UNet（输入通道=latent_channels）
+latent_unet = DiffusionModelUNet(
+    spatial_dims=3,
+    in_channels=8,  # 潜在通道数
+    out_channels=8,
+    num_channels=(64, 128, 256),
+    attention_levels=(False, True, True),
+).to(device)
+
+latent_inferer = LatentDiffusionInferer(scheduler=scheduler)
+
+autoencoder.eval()
+for batch in train_loader:
+    voxel_grid = batch["voxel"].to(device)
+    
+    # 编码到潜在空间
+    with torch.no_grad():
+        z_mu, z_sigma = autoencoder.encode(voxel_grid)
+        z = autoencoder.sampling(z_mu, z_sigma)
+    
+    # 在潜在空间训练扩散
+    noise = torch.randn_like(z)
+    timesteps = torch.randint(0, 1000, (z.shape[0],), device=device)
+    
+    noise_pred = latent_inferer(
+        inputs=z,
+        diffusion_model=latent_unet,
+        noise=noise,
+        timesteps=timesteps,
+    )
+    
+    loss = F.mse_loss(noise_pred, noise)
+    loss.backward()
+    optimizer.step()
+
+# ========== 3. 潜在扩散采样 ==========
+with torch.no_grad():
+    # 在潜在空间采样
+    latent_noise = torch.randn((16, 8, 8, 8, 8)).to(device)  # 潜在空间更小
+    
+    latent_samples = latent_inferer.sample(
+        input_noise=latent_noise,
+        diffusion_model=latent_unet,
+        scheduler=scheduler,
+    )
+    
+    # 解码到像素空间
+    voxel_samples = autoencoder.decode(latent_samples)
+```
+
+## 关键技巧和最佳实践
+
+### 1. 显存优化
+
+```python
+# 使用混合精度训练
+from torch.cuda.amp import GradScaler, autocast
+
+scaler = GradScaler()
+
+with autocast(enabled=True):
+    noise_pred = inferer(...)
+    loss = F.mse_loss(noise_pred, noise)
+
+scaler.scale(loss).backward()
+scaler.step(optimizer)
+scaler.update()
+
+# 使用梯度累积
+accumulation_steps = 4
+for i, batch in enumerate(train_loader):
+    loss = compute_loss(batch)
+    loss = loss / accumulation_steps
+    loss.backward()
+    
+    if (i + 1) % accumulation_steps == 0:
+        optimizer.step()
+        optimizer.zero_grad()
+```
+
+### 2. 学习率调度
+
+```python
+from torch.optim.lr_scheduler import CosineAnnealingLR
+
+optimizer = torch.optim.Adam(unet.parameters(), lr=2.5e-5)
+scheduler_lr = CosineAnnealingLR(
+    optimizer, 
+    T_max=num_epochs,
+    eta_min=1e-6
+)
+
+for epoch in range(num_epochs):
+    train_one_epoch(...)
+    scheduler_lr.step()
+```
+
+### 3. EMA权重（指数移动平均）
+
+```python
+from copy import deepcopy
+
+# 创建EMA模型
+ema_model = deepcopy(unet)
+ema_decay = 0.9999
+
+def update_ema(ema_model, model, decay):
+    with torch.no_grad():
+        for ema_param, param in zip(ema_model.parameters(), model.parameters()):
+            ema_param.data.mul_(decay).add_(param.data, alpha=1 - decay)
+
+# 训练时更新EMA
+for batch in train_loader:
+    # ... 训练步骤
+    update_ema(ema_model, unet, ema_decay)
+
+# 采样时使用EMA模型
+ema_model.eval()
+synthetic = inferer.sample(
+    input_noise=noise,
+    diffusion_model=ema_model,
+    scheduler=scheduler,
+)
+```
+
+### 4. 调试和可视化
+
+```python
+# 保存中间扩散步骤
+synthetic, intermediates = inferer.sample(
+    input_noise=noise,
+    diffusion_model=unet,
+    scheduler=scheduler,
+    save_intermediates=True,
+    intermediate_steps=10,  # 每10步保存一次
+)
+
+# intermediates 是一个包含中间结果的列表
+# 可视化扩散过程
+import matplotlib.pyplot as plt
+
+fig, axes = plt.subplots(1, len(intermediates), figsize=(20, 2))
+for i, img in enumerate(intermediates):
+    axes[i].imshow(img[0, 0, :, :, 16].cpu(), cmap='gray')  # 显示第16层
+    axes[i].axis('off')
+plt.show()
+```
+
+### 5. 模型检查点保存
+
+```python
+# 保存检查点
+checkpoint = {
+    'epoch': epoch,
+    'model_state_dict': unet.state_dict(),
+    'optimizer_state_dict': optimizer.state_dict(),
+    'scheduler_state_dict': scheduler.state_dict(),
+    'loss': loss,
+}
+torch.save(checkpoint, 'checkpoints/diffusion_epoch_{}.pth'.format(epoch))
+
+# 加载检查点
+checkpoint = torch.load('checkpoints/diffusion_epoch_100.pth')
+unet.load_state_dict(checkpoint['model_state_dict'])
+optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+```
+
+## 常见问题和解决方案
+
+### 问题1: 显存不足
+
+**解决方案**:
+1. 减小batch_size
+2. 使用潜在扩散模型（LatentDiffusionInferer + AutoencoderKL）
+3. 减小体素分辨率
+4. 使用梯度检查点（gradient checkpointing）
+
+### 问题2: 训练不稳定
+
+**解决方案**:
+1. 使用EMA（指数移动平均）
+2. 调整学习率（推荐2.5e-5到1e-4）
+3. 使用`v_prediction`而非`epsilon`
+4. 增加warmup步数
+
+### 问题3: 生成质量差
+
+**解决方案**:
+1. 增加训练步数（至少100k步）
+2. 增加模型容量（num_channels）
+3. 使用注意力机制（attention_levels）
+4. 调整噪声调度（试试"scaled_linear_beta"）
+5. 使用DDIM采样器增加采样步数
+
+### 问题4: 采样速度慢
+
+**解决方案**:
+1. 使用DDIMScheduler替代DDPMScheduler
+2. 减少推理步数（DDIM可用20-50步）
+3. 使用潜在扩散模型
+4. 使用PNDMScheduler
+
+## 参考资料
+
+- [MONAI Generative Models文档](https://docs.monai.io/projects/generative/en/latest/)
+- [3D DDPM教程](mdc:GenerativeModels/tutorials/generative/3d_ddpm/3d_ddpm_tutorial.ipynb)
+- [潜在扩散模型教程](mdc:GenerativeModels/tutorials/generative/3d_ldm/3d_ldm_tutorial.ipynb)
+- [原始DDPM论文](https://arxiv.org/abs/2006.11239)
+- [DDIM论文](https://arxiv.org/abs/2010.02502)
+
+## 与项目集成
+
+在 [monai_diffusion/](mdc:monai_diffusion/) 文件夹下使用时：
+
+```python
+# monai_diffusion/train.py
+import sys
+from pathlib import Path
+
+# 添加GenerativeModels到Python路径
+project_root = Path(__file__).parent.parent
+generative_path = project_root / "GenerativeModels"
+sys.path.insert(0, str(generative_path))
+
+# 现在可以导入
+from generative.inferers import DiffusionInferer
+from generative.networks.nets import DiffusionModelUNet
+from generative.networks.schedulers import DDPMScheduler
+
+# ... 你的训练代码
+```
+
+确保环境依赖已安装（参考 [monai_diffusion/readme.md](mdc:monai_diffusion/readme.md)）。

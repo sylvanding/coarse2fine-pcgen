@@ -1,0 +1,145 @@
+# MONAI 3D Latent Diffusion Model Configuration
+# 用于点云体素生成的完整配置文件
+
+# 数据配置
+data:
+  # 训练和验证数据路径
+  train_data_dir: "data/voxels_nifti/train"
+  val_data_dir: "data/voxels_nifti/val"
+  
+  # 体素分辨率（训练时的目标分辨率）
+  voxel_size: 64
+  
+  # 数据加载设置
+  cache_rate: 0.25  # 缓存比例，0表示不缓存，1表示全部缓存
+  num_workers: 4
+  pin_memory: true
+  
+  # 数据增强
+  augmentation:
+    enabled: true
+    random_flip_prob: 0.5
+    random_rotate_prob: 0.5
+
+# AutoencoderKL 配置
+autoencoder:
+  # 网络架构
+  spatial_dims: 3
+  in_channels: 1
+  out_channels: 1
+  num_channels: [32, 64, 64]
+  latent_channels: 3
+  num_res_blocks: 1
+  norm_num_groups: 16
+  attention_levels: [false, false, true]
+  
+  # 训练配置
+  training:
+    n_epochs: 500
+    batch_size: 2
+    learning_rate: 1.0e-4
+    
+    # 损失权重
+    adv_weight: 0.01
+    perceptual_weight: 0.001
+    kl_weight: 1.0e-6
+    
+    # 对抗训练
+    autoencoder_warm_up_n_epochs: 5  # 前N个epoch不使用对抗损失
+    
+    # 判别器配置
+    discriminator:
+      num_layers_d: 3
+      num_channels: 32
+    
+    # 验证和保存
+    val_interval: 10  # 每N个epoch进行验证
+    save_interval: 10  # 每N个epoch保存checkpoint
+    
+    # 快速开发模式
+    fast_dev_run: false  # 如果为true，只运行少量batch用于调试
+    fast_dev_run_batches: 2  # fast_dev_run模式下每个epoch运行的batch数
+    
+  # Checkpoint路径
+  checkpoints:
+    output_dir: "outputs/autoencoder"
+    save_best: true  # 是否保存最佳模型
+    resume_from: null  # 恢复训练的checkpoint路径，null表示从头开始
+  
+  # 日志配置
+  logging:
+    log_dir: "logs/autoencoder"
+    log_interval: 10  # 每N个batch记录一次日志
+
+# Diffusion Model 配置
+diffusion:
+  # UNet架构
+  spatial_dims: 3
+  in_channels: 3  # 必须匹配autoencoder的latent_channels
+  out_channels: 3
+  num_channels: [32, 64, 64]
+  attention_levels: [false, true, true]
+  num_head_channels: [0, 64, 64]
+  num_res_blocks: 1
+  
+  # 调度器配置
+  scheduler:
+    num_train_timesteps: 1000
+    schedule: "scaled_linear_beta"
+    beta_start: 0.0015
+    beta_end: 0.0195
+  
+  # 训练配置
+  training:
+    n_epochs: 500
+    batch_size: 2
+    learning_rate: 1.0e-4
+    
+    # 验证和保存
+    val_interval: 10
+    save_interval: 10
+    
+    # 样本生成
+    generate_samples_interval: 20  # 每N个epoch生成样本用于监控
+    num_samples_to_generate: 4  # 生成的样本数量
+    
+    # 快速开发模式
+    fast_dev_run: false
+    fast_dev_run_batches: 2
+  
+  # Checkpoint路径
+  checkpoints:
+    autoencoder_path: "outputs/autoencoder/best_model.pt"  # 预训练的autoencoder
+    output_dir: "outputs/diffusion"
+    save_best: true
+    resume_from: null
+  
+  # 日志配置
+  logging:
+    log_dir: "logs/diffusion"
+    log_interval: 10
+
+# 采样配置
+sampling:
+  num_inference_steps: 1000  # DDPM采样步数
+  num_samples: 16  # 一次生成的样本数量
+  
+  # 输出配置
+  output_dir: "outputs/samples"
+  save_format: "nifti"  # "nifti" 或 "pointcloud"
+  
+  # 点云转换配置（如果save_format包含pointcloud）
+  pointcloud:
+    num_points: 10000
+    threshold: 0.1
+    method: "probabilistic"  # "probabilistic", "center", "random", "weighted"
+
+# 设备配置
+device:
+  use_cuda: true
+  gpu_id: 0  # 使用的GPU ID
+  mixed_precision: true  # 是否使用混合精度训练
+
+# 随机种子
+seed: 42
+

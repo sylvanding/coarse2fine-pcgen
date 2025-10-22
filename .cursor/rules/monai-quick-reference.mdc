@@ -1,0 +1,734 @@
+---
+description: MONAI Generative常用代码片段和快速参考
+---
+
+# MONAI Generative 快速参考
+
+本文档提供常用代码片段，可快速复制使用。
+
+## 快速启动模板
+
+### 最小训练脚本
+
+```python
+"""最小3D扩散模型训练脚本"""
+import sys
+from pathlib import Path
+
+# 路径设置
+sys.path.insert(0, str(Path(__file__).parent.parent / "GenerativeModels"))
+
+import torch
+import torch.nn.functional as F
+from generative.inferers import DiffusionInferer
+from generative.networks.nets import DiffusionModelUNet
+from generative.networks.schedulers import DDPMScheduler
+
+# 设备
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# 模型
+unet = DiffusionModelUNet(
+    spatial_dims=3, in_channels=1, out_channels=1,
+    num_channels=(64, 128, 256), attention_levels=(False, True, True),
+).to(device)
+
+# 调度器和推理器
+scheduler = DDPMScheduler(num_train_timesteps=1000)
+inferer = DiffusionInferer(scheduler=scheduler)
+
+# 优化器
+optimizer = torch.optim.Adam(unet.parameters(), lr=2.5e-5)
+
+# 训练循环
+for epoch in range(num_epochs):
+    for voxel_batch in train_loader:
+        voxel_batch = voxel_batch.to(device)
+        
+        noise = torch.randn_like(voxel_batch)
+        timesteps = torch.randint(0, 1000, (voxel_batch.shape[0],), device=device)
+        
+        noise_pred = inferer(
+            inputs=voxel_batch,
+            diffusion_model=unet,
+            noise=noise,
+            timesteps=timesteps,
+        )
+        
+        loss = F.mse_loss(noise_pred, noise)
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+
+# 采样
+scheduler.set_timesteps(50)
+with torch.no_grad():
+    samples = inferer.sample(
+        input_noise=torch.randn((16, 1, 64, 64, 64)).to(device),
+        diffusion_model=unet,
+        scheduler=scheduler,
+    )
+```
+
+### 最小条件生成脚本
+
+```python
+"""条件扩散模型（类别引导）"""
+import torch
+import torch.nn as nn
+from generative.networks.nets import DiffusionModelUNet
+
+class ClassConditionalUNet(nn.Module):
+    def __init__(self, num_classes=10):
+        super().__init__()
+        self.unet = DiffusionModelUNet(
+            spatial_dims=3, in_channels=1, out_channels=1,
+            num_channels=(64, 128, 256), attention_levels=(False, True, True),
+            cross_attention_dim=128,  # 条件维度
+        )
+        self.class_emb = nn.Embedding(num_classes, 128)
+    
+    def forward(self, x, timesteps, class_labels):
+        emb = self.class_emb(class_labels)
+        return self.unet(x=x, timesteps=timesteps, context=emb)
+
+# 使用
+model = ClassConditionalUNet(num_classes=10).to(device)
+
+# 训练
+class_labels = batch['label'].to(device)
+noise_pred = inferer(
+    inputs=voxel_batch,
+    diffusion_model=lambda x, t: model(x, t, class_labels),
+    noise=noise,
+    timesteps=timesteps,
+)
+
+# 采样（生成类别5）
+target_class = torch.full((16,), 5, device=device)
+samples = inferer.sample(
+    input_noise=torch.randn((16, 1, 64, 64, 64)).to(device),
+    diffusion_model=lambda x, t: model(x, t, target_class),
+    scheduler=scheduler,
+)
+```
+
+## 常用配置组合
+
+### 配置1: 快速原型（小模型）
+
+```python
+# 适用于快速实验，显存占用小
+unet = DiffusionModelUNet(
+    spatial_dims=3,
+    in_channels=1,
+    out_channels=1,
+    num_channels=(32, 64, 128),       # 小通道数
+    attention_levels=(False, False, True),  # 少用注意力
+    num_res_blocks=1,                  # 少残差块
+    num_head_channels=16,
+)
+
+scheduler = DDPMScheduler(num_train_timesteps=500)  # 少训练步数
+```
+
+**适用场景**: 
+- 快速验证想法
+- 显存<8GB
+- 体素分辨率≤32³
+
+### 配置2: 标准训练（中等模型）
+
+```python
+# 平衡性能和速度
+unet = DiffusionModelUNet(
+    spatial_dims=3,
+    in_channels=1,
+    out_channels=1,
+    num_channels=(64, 128, 256),
+    attention_levels=(False, True, True),
+    num_res_blocks=2,
+    num_head_channels=32,
+)
+
+scheduler = DDPMScheduler(
+    num_train_timesteps=1000,
+    schedule="linear_beta",
+    prediction_type="epsilon",
+)
+```
+
+**适用场景**:
+- 正式训练
+- 显存12-16GB
+- 体素分辨率64³
+
+### 配置3: 高质量生成（大模型）
+
+```python
+# 最佳质量，需要大显存
+unet = DiffusionModelUNet(
+    spatial_dims=3,
+    in_channels=1,
+    out_channels=1,
+    num_channels=(128, 256, 512, 512),  # 大通道数
+    attention_levels=(False, True, True, True),
+    num_res_blocks=3,
+    num_head_channels=64,
+    use_flash_attention=True,  # 使用flash attention
+)
+
+scheduler = DDPMScheduler(
+    num_train_timesteps=1000,
+    schedule="scaled_linear_beta",  # 更平滑的调度
+    prediction_type="v_prediction",  # v-prediction
+)
+```
+
+**适用场景**:
+- 追求最佳质量
+- 显存≥24GB
+- 体素分辨率64³或更高
+
+### 配置4: 潜在扩散（节省显存）
+
+```python
+from generative.networks.nets import AutoencoderKL
+from generative.inferers import LatentDiffusionInferer
+
+# 先训练自编码器
+autoencoder = AutoencoderKL(
+    spatial_dims=3,
+    in_channels=1,
+    out_channels=1,
+    num_channels=(64, 128, 256),
+    latent_channels=8,  # 压缩到8通道
+)
+
+# 在潜在空间训练扩散模型（输入通道=latent_channels）
+latent_unet = DiffusionModelUNet(
+    spatial_dims=3,
+    in_channels=8,  # 注意这里
+    out_channels=8,
+    num_channels=(64, 128, 256),
+    attention_levels=(False, True, True),
+)
+
+latent_inferer = LatentDiffusionInferer(scheduler=scheduler)
+```
+
+**适用场景**:
+- 显存不足
+- 需要高分辨率（128³或更高）
+- 愿意分两阶段训练
+
+## 常用数据预处理
+
+### 点云标准化
+
+```python
+def normalize_point_cloud(point_cloud: np.ndarray) -> np.ndarray:
+    """标准化点云到单位立方体"""
+    # 中心化
+    centroid = np.mean(point_cloud, axis=0)
+    point_cloud = point_cloud - centroid
+    
+    # 缩放到[-0.5, 0.5]
+    max_dist = np.max(np.abs(point_cloud))
+    point_cloud = point_cloud / (2 * max_dist)
+    
+    # 平移到[0, 1]
+    point_cloud = point_cloud + 0.5
+    
+    return point_cloud
+```
+
+### 体素数据增强
+
+```python
+import torch.nn.functional as F
+
+def augment_voxel(voxel: torch.Tensor) -> torch.Tensor:
+    """体素数据增强：随机旋转和翻转"""
+    # 随机90度旋转（沿z轴）
+    k = torch.randint(0, 4, (1,)).item()
+    voxel = torch.rot90(voxel, k=k, dims=[2, 3])  # (C, D, H, W)
+    
+    # 随机翻转
+    if torch.rand(1) > 0.5:
+        voxel = torch.flip(voxel, dims=[2])  # 翻转x轴
+    if torch.rand(1) > 0.5:
+        voxel = torch.flip(voxel, dims=[3])  # 翻转y轴
+    if torch.rand(1) > 0.5:
+        voxel = torch.flip(voxel, dims=[4])  # 翻转z轴
+    
+    return voxel
+```
+
+## 常用工具函数
+
+### 计算模型参数量
+
+```python
+def count_parameters(model: nn.Module) -> int:
+    """计算模型参数量"""
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+# 使用
+num_params = count_parameters(unet)
+print(f"模型参数量: {num_params:,} ({num_params/1e6:.2f}M)")
+```
+
+### 估算显存占用
+
+```python
+def estimate_memory(
+    batch_size: int,
+    voxel_size: int,
+    num_channels: tuple,
+    dtype_bytes: int = 4  # float32
+) -> dict:
+    """估算显存占用（MB）"""
+    
+    # 输入数据
+    input_size = batch_size * voxel_size ** 3 * dtype_bytes / 1024 / 1024
+    
+    # 模型参数（粗略估计）
+    param_size = sum(num_channels) * voxel_size ** 2 * dtype_bytes / 1024 / 1024
+    
+    # 前向传播激活值（约为输入的10-20倍）
+    activation_size = input_size * 15
+    
+    # 反向传播梯度（约为参数的2倍）
+    gradient_size = param_size * 2
+    
+    total = input_size + param_size + activation_size + gradient_size
+    
+    return {
+        'input_mb': input_size,
+        'param_mb': param_size,
+        'activation_mb': activation_size,
+        'gradient_mb': gradient_size,
+        'total_mb': total,
+        'total_gb': total / 1024,
+    }
+
+# 使用
+mem = estimate_memory(batch_size=8, voxel_size=64, num_channels=(64, 128, 256))
+print(f"预估显存占用: {mem['total_gb']:.2f} GB")
+```
+
+### 保存和加载检查点
+
+```python
+def save_checkpoint(
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    epoch: int,
+    loss: float,
+    filepath: str,
+):
+    """保存训练检查点"""
+    torch.save({
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'loss': loss,
+    }, filepath)
+    print(f"检查点已保存: {filepath}")
+
+def load_checkpoint(
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    filepath: str,
+    device: torch.device,
+) -> int:
+    """加载训练检查点，返回epoch"""
+    checkpoint = torch.load(filepath, map_location=device)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    epoch = checkpoint['epoch']
+    loss = checkpoint['loss']
+    print(f"检查点已加载: epoch={epoch}, loss={loss:.4f}")
+    return epoch
+```
+
+### 可视化体素
+
+```python
+import matplotlib.pyplot as plt
+
+def visualize_voxel_slices(
+    voxel: np.ndarray,
+    num_slices: int = 8,
+    save_path: str = None
+):
+    """可视化体素的多个切片"""
+    D, H, W = voxel.shape
+    slice_indices = np.linspace(0, D-1, num_slices, dtype=int)
+    
+    fig, axes = plt.subplots(1, num_slices, figsize=(20, 3))
+    
+    for i, idx in enumerate(slice_indices):
+        axes[i].imshow(voxel[idx], cmap='gray', vmin=0, vmax=1)
+        axes[i].set_title(f'Slice {idx}')
+        axes[i].axis('off')
+    
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    
+    plt.show()
+
+# 使用
+visualize_voxel_slices(voxel_grid, save_path='outputs/voxel_viz.png')
+```
+
+### 体素转点云（多种方法）
+
+```python
+def voxel_to_pointcloud(
+    voxel: np.ndarray,
+    num_points: int = 2048,
+    method: str = 'random',  # 'random', 'farthest', 'grid'
+) -> np.ndarray:
+    """
+    从体素转换为点云
+    
+    Args:
+        voxel: 体素网格 (D, H, W)
+        num_points: 目标点数
+        method: 采样方法
+            - 'random': 随机采样
+            - 'farthest': 最远点采样（FPS）
+            - 'grid': 网格采样
+    """
+    D, H, W = voxel.shape
+    
+    # 1. 获取占有体素
+    threshold = 0.5
+    occupied = voxel > threshold
+    indices = np.argwhere(occupied).astype(np.float32)
+    
+    if len(indices) == 0:
+        return np.random.rand(num_points, 3)
+    
+    # 2. 标准化坐标
+    indices = indices / np.array([D-1, H-1, W-1])
+    
+    # 3. 根据方法采样
+    if method == 'random':
+        # 随机采样
+        if len(indices) >= num_points:
+            sampled = indices[np.random.choice(len(indices), num_points, replace=False)]
+        else:
+            sampled = indices[np.random.choice(len(indices), num_points, replace=True)]
+    
+    elif method == 'farthest':
+        # 最远点采样（简化版）
+        sampled = []
+        remaining = indices.copy()
+        
+        # 随机选择第一个点
+        current_idx = np.random.randint(len(remaining))
+        sampled.append(remaining[current_idx])
+        remaining = np.delete(remaining, current_idx, axis=0)
+        
+        # 迭代选择最远点
+        for _ in range(num_points - 1):
+            if len(remaining) == 0:
+                break
+            
+            # 计算到已选点的最小距离
+            dists = np.min([
+                np.sum((remaining - s) ** 2, axis=1)
+                for s in sampled
+            ], axis=0)
+            
+            # 选择最远点
+            farthest_idx = np.argmax(dists)
+            sampled.append(remaining[farthest_idx])
+            remaining = np.delete(remaining, farthest_idx, axis=0)
+        
+        sampled = np.array(sampled)
+    
+    elif method == 'grid':
+        # 均匀网格采样
+        grid_size = int(np.ceil(num_points ** (1/3)))
+        grid = np.meshgrid(
+            np.linspace(0, 1, grid_size),
+            np.linspace(0, 1, grid_size),
+            np.linspace(0, 1, grid_size),
+        )
+        grid_points = np.stack([g.flatten() for g in grid], axis=1)
+        
+        # 找到最近的占有体素
+        from scipy.spatial import cKDTree
+        tree = cKDTree(indices)
+        distances, _ = tree.query(grid_points)
+        
+        # 保留距离小于阈值的点
+        valid = distances < 0.1  # 阈值可调
+        sampled = grid_points[valid]
+        
+        if len(sampled) < num_points:
+            # 不够则随机补充
+            extra = indices[np.random.choice(len(indices), num_points - len(sampled))]
+            sampled = np.vstack([sampled, extra])
+        else:
+            sampled = sampled[:num_points]
+    
+    # 4. 添加亚体素抖动
+    jitter = np.random.randn(*sampled.shape) * 0.01
+    sampled = np.clip(sampled + jitter, 0, 1)
+    
+    return sampled
+```
+
+## 调试技巧
+
+### 检查梯度
+
+```python
+def check_gradients(model: nn.Module):
+    """检查模型梯度"""
+    for name, param in model.named_parameters():
+        if param.grad is not None:
+            grad_norm = param.grad.norm().item()
+            print(f"{name}: grad_norm={grad_norm:.6f}")
+            
+            if grad_norm > 1000:
+                print(f"  ⚠️ 梯度爆炸!")
+            elif grad_norm < 1e-6:
+                print(f"  ⚠️ 梯度消失!")
+        else:
+            print(f"{name}: 无梯度")
+
+# 使用
+loss.backward()
+check_gradients(unet)
+```
+
+### 可视化噪声调度
+
+```python
+def visualize_noise_schedule(scheduler):
+    """可视化噪声调度"""
+    timesteps = np.arange(scheduler.num_train_timesteps)
+    alphas = scheduler.alphas_cumprod.cpu().numpy()
+    
+    plt.figure(figsize=(10, 5))
+    plt.subplot(1, 2, 1)
+    plt.plot(timesteps, alphas)
+    plt.xlabel('Timestep')
+    plt.ylabel('α_t (cumulative)')
+    plt.title('Forward Process')
+    
+    plt.subplot(1, 2, 2)
+    plt.plot(timesteps, 1 - alphas)
+    plt.xlabel('Timestep')
+    plt.ylabel('1 - α_t')
+    plt.title('Noise Level')
+    
+    plt.tight_layout()
+    plt.show()
+
+# 使用
+visualize_noise_schedule(scheduler)
+```
+
+## 性能优化
+
+### 数据加载优化
+
+```python
+# 使用pin_memory加速CPU到GPU传输
+train_loader = torch.utils.data.DataLoader(
+    dataset,
+    batch_size=batch_size,
+    shuffle=True,
+    num_workers=4,
+    pin_memory=True,  # 关键
+    persistent_workers=True,  # 保持worker进程
+)
+```
+
+### 使用编译优化（PyTorch 2.0+）
+
+```python
+# PyTorch 2.0的编译优化
+if hasattr(torch, 'compile'):
+    unet = torch.compile(unet, mode='reduce-overhead')
+    print("模型已编译优化")
+```
+
+### 梯度裁剪
+
+```python
+# 防止梯度爆炸
+max_grad_norm = 1.0
+torch.nn.utils.clip_grad_norm_(unet.parameters(), max_grad_norm)
+```
+
+## 评估指标
+
+### FID计算（使用预训练特征）
+
+```python
+from generative.metrics import FIDMetric
+
+# 初始化FID
+fid_metric = FIDMetric()
+
+# 计算真实数据特征
+for real_batch in real_data_loader:
+    fid_metric.update(real_batch, is_real=True)
+
+# 计算生成数据特征
+for fake_batch in fake_data_loader:
+    fid_metric.update(fake_batch, is_real=False)
+
+# 获取FID分数
+fid_score = fid_metric.compute()
+print(f"FID Score: {fid_score:.2f}")
+```
+
+## 完整训练模板（可复制）
+
+```python
+"""
+完整的3D体素扩散模型训练脚本
+包含所有最佳实践
+"""
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent / "GenerativeModels"))
+
+import os
+import torch
+import torch.nn.functional as F
+from torch.cuda.amp import GradScaler, autocast
+from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
+
+from generative.inferers import DiffusionInferer
+from generative.networks.nets import DiffusionModelUNet
+from generative.networks.schedulers import DDPMScheduler, DDIMScheduler
+
+def main():
+    # ========== 配置 ==========
+    config = {
+        'voxel_size': 64,
+        'batch_size': 8,
+        'num_epochs': 100,
+        'learning_rate': 2.5e-5,
+        'num_train_timesteps': 1000,
+        'num_inference_steps': 50,
+        'save_interval': 10,
+        'output_dir': 'outputs/diffusion',
+    }
+    
+    os.makedirs(config['output_dir'], exist_ok=True)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # ========== 模型 ==========
+    unet = DiffusionModelUNet(
+        spatial_dims=3, in_channels=1, out_channels=1,
+        num_channels=(64, 128, 256),
+        attention_levels=(False, True, True),
+        num_res_blocks=2, num_head_channels=32,
+    ).to(device)
+    
+    scheduler = DDPMScheduler(num_train_timesteps=config['num_train_timesteps'])
+    inferer = DiffusionInferer(scheduler=scheduler)
+    
+    # ========== 优化器 ==========
+    optimizer = torch.optim.Adam(unet.parameters(), lr=config['learning_rate'])
+    scaler = GradScaler()
+    
+    # ========== TensorBoard ==========
+    writer = SummaryWriter(os.path.join(config['output_dir'], 'logs'))
+    
+    # ========== 训练循环 ==========
+    global_step = 0
+    for epoch in range(config['num_epochs']):
+        unet.train()
+        epoch_loss = 0
+        
+        with tqdm(train_loader, desc=f"Epoch {epoch+1}") as pbar:
+            for voxel_batch in pbar:
+                voxel_batch = voxel_batch.to(device)
+                
+                optimizer.zero_grad()
+                
+                with autocast(enabled=True):
+                    noise = torch.randn_like(voxel_batch)
+                    timesteps = torch.randint(
+                        0, config['num_train_timesteps'],
+                        (voxel_batch.shape[0],), device=device
+                    )
+                    
+                    noise_pred = inferer(
+                        inputs=voxel_batch,
+                        diffusion_model=unet,
+                        noise=noise,
+                        timesteps=timesteps,
+                    )
+                    
+                    loss = F.mse_loss(noise_pred, noise)
+                
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+                
+                epoch_loss += loss.item()
+                global_step += 1
+                
+                writer.add_scalar('Loss/train', loss.item(), global_step)
+                pbar.set_postfix({'loss': f'{loss.item():.4f}'})
+        
+        avg_loss = epoch_loss / len(train_loader)
+        print(f"Epoch {epoch+1} 平均损失: {avg_loss:.4f}")
+        
+        # ========== 保存检查点 ==========
+        if (epoch + 1) % config['save_interval'] == 0:
+            checkpoint_path = os.path.join(
+                config['output_dir'],
+                f'checkpoint_epoch_{epoch+1}.pth'
+            )
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': unet.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': avg_loss,
+            }, checkpoint_path)
+            
+            # ========== 生成样本 ==========
+            unet.eval()
+            ddim_scheduler = DDIMScheduler(num_train_timesteps=1000)
+            ddim_scheduler.set_timesteps(config['num_inference_steps'])
+            
+            with torch.no_grad():
+                samples = inferer.sample(
+                    input_noise=torch.randn(
+                        (4, 1, config['voxel_size'], config['voxel_size'], config['voxel_size'])
+                    ).to(device),
+                    diffusion_model=unet,
+                    scheduler=ddim_scheduler,
+                    verbose=False,
+                )
+                
+                # 保存样本
+                for i in range(4):
+                    sample_slice = samples[i, 0, :, :, config['voxel_size']//2].cpu()
+                    writer.add_image(f'Samples/sample_{i}', sample_slice[None], epoch)
+    
+    writer.close()
+    print("训练完成!")
+
+if __name__ == "__main__":
+    main()
+```
+
+这个快速参考涵盖了最常用的代码模式，可以直接复制使用。
