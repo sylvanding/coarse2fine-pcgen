@@ -4,18 +4,38 @@
 
 ## 快速开始
 
+Clone仓库并进入项目根目录：
+
+```bash
+git clone --depth 1 -b master https://kkgithub.com/sylvanding/coarse2fine-pcgen
+cd coarse2fine-pcgen/monai_diffusion
+```
+
 ### 环境设置
+
+#### ShareGPU
+
+```bash
+# tensorboard logs
+ln -s /hy-tmp/coarse2fine-pcgen/outputs/logs /tb_logs
+```
+
+#### Ai.Paratera
+
+#### 3060 Ti, CUDA 121
+
+cuda 121 is for XFormers.
 
 ```bash
 # 创建conda环境
-conda create -n monai-diffusion python==3.10
+conda create -n monai-diffusion python==3.11
 conda activate monai-diffusion
 
 # 降级setuptools -> solve monai warning: `pkg_resources is deprecated as an API`
 pip install 'setuptools<69'
 
-# 安装PyTorch (CUDA 11.8)
-pip install torch==2.2.1 torchvision==0.17.1 --index-url https://download.pytorch.org/whl/cu118
+# 安装PyTorch (CUDA 121)
+pip install torch==2.2.1 torchvision==0.17.1 --index-url https://download.pytorch.org/whl/cu121
 
 # 安装本项目依赖
 cd monai_diffusion
@@ -28,36 +48,37 @@ python -c "import monai; print(f'MONAI {monai.__version__} installed successfull
 python test_monai_installation.py
 ```
 
-完整测试脚本输出(以3060 Ti, CUDA 11.8为例)：
+完整测试脚本输出(以3060 Ti, CUDA 121为例)：
 
 ```text
 ✓ CUDA version: NVIDIA GeForce RTX 3060 Ti
+✓ Xformers version: 0.0.25
 ✓ MONAI version: 1.3.1
 
 详细配置:
 MONAI version: 1.3.1
 Numpy version: 1.26.4
-Pytorch version: 2.2.1+cu118
+Pytorch version: 2.2.1+cu121
 MONAI flags: HAS_EXT = False, USE_COMPILED = False, USE_META_DICT = False
 MONAI rev id: 96bfda00c6bd290297f5e3514ea227c6be4d08b4
-MONAI __file__: /<username>/miniconda3/envs/monai-diffusion/lib/python3.10/site-packages/monai/__init__.py
+MONAI __file__: /<username>/miniconda3/envs/monai-diffusion-test/lib/python3.11/site-packages/monai/__init__.py
 
 Optional dependencies:
 Pytorch Ignite version: 0.5.3
 ITK version: 5.4.4
 Nibabel version: 5.3.2
 scikit-image version: 0.25.2
-scipy version: 1.15.3
+scipy version: 1.16.2
 Pillow version: 11.3.0
 Tensorboard version: 2.20.0
 gdown version: 5.2.0
-TorchVision version: 0.17.1+cu118
+TorchVision version: 0.17.1+cu121
 tqdm version: 4.67.1
 lmdb version: 1.7.5
 psutil version: 7.1.1
 pandas version: 2.3.3
 einops version: 0.8.1
-transformers version: 4.21.3
+transformers version: 4.28.0
 mlflow version: 3.5.0
 pynrrd version: 1.1.3
 clearml version: NOT INSTALLED or UNKNOWN VERSION.
@@ -69,6 +90,14 @@ For details about installing the optional dependencies, please visit:
 ✓ 基础变换测试通过
 
 ✓ MONAI 安装成功!
+```
+
+## 数据集制作与压缩
+
+运行 scripts/h5pc2voxel/convert_h5_to_nifti.py 脚本，将 H5 文件转换为 NIfTI 文件。随后压缩：
+
+```bash
+tar -czvf batch_simulation_microtubule_20251017_2048_nifti.tar.gz batch_simulation_microtubule_20251017_2048_nifti
 ```
 
 ## 使用说明

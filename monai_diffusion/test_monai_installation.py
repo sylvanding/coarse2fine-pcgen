@@ -4,6 +4,11 @@ def test_monai_installation():
         import torch
         print(f"✓ CUDA version: {torch.cuda.get_device_name(0)}")
         
+        # 测试xformers
+        import xformers
+        print(f"✓ Xformers version: {xformers.__version__}")
+        
+        # 测试monai
         import monai
         print(f"✓ MONAI version: {monai.__version__}")
         

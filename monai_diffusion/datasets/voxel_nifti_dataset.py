@@ -66,7 +66,7 @@ class VoxelNiftiDataset:
         if augmentation_config is None:
             augmentation_config = {
                 'random_flip_prob': 0.5,
-                'random_rotate_prob': 0.5
+                # 'random_rotate_prob': 0.5
             }
         self.augmentation_config = augmentation_config
         
@@ -170,7 +170,7 @@ class VoxelNiftiDataset:
                 transforms.ScaleIntensityRanged(
                     keys="image",
                     a_min=0.0,
-                    a_max=1.0,
+                    a_max=255.0,
                     b_min=-1.0,
                     b_max=1.0,
                     clip=True
@@ -182,7 +182,7 @@ class VoxelNiftiDataset:
                 transforms.ScaleIntensityRanged(
                     keys="image",
                     a_min=0.0,
-                    a_max=1.0,
+                    a_max=255.0,
                     b_min=0.0,
                     b_max=1.0,
                     clip=True
@@ -237,7 +237,7 @@ def create_train_val_dataloaders(
         voxel_size_tuple = voxel_size
     
     cache_rate = data_config.get('cache_rate', 0.0)
-    num_workers = data_config.get('num_workers', 4)
+    num_workers = data_config.get('num_workers', 2)
     pin_memory = data_config.get('pin_memory', True)
     
     augmentation_config = data_config.get('augmentation', {})

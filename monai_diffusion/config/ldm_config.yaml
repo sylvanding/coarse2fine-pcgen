@@ -4,24 +4,24 @@
 # 数据配置
 data:
   # 训练和验证数据路径
-  train_data_dir: "data/voxels_nifti/train"
-  val_data_dir: "data/voxels_nifti/val"
+  train_data_dir: "/repos/datasets/batch_simulation_microtubule_20251017_2048_nifti/train"
+  val_data_dir: "/repos/datasets/batch_simulation_microtubule_20251017_2048_nifti/val"
   
   # 体素分辨率（训练时的目标分辨率）
   # 可以是单个整数（各向同性）或列表[X, Y, Z]（各向异性）
   # 例如: 64 或 [64, 64, 32]
-  voxel_size: [64, 64, 64]  # [X, Y, Z]
+  voxel_size: [64, 64, 32]  # [X, Y, Z]
   
   # 数据加载设置
-  cache_rate: 0.25  # 缓存比例，0表示不缓存，1表示全部缓存
-  num_workers: 4
+  cache_rate: 0  # 缓存比例，0表示不缓存，1表示全部缓存
+  num_workers: 1
   pin_memory: true
   
   # 数据增强
   augmentation:
     enabled: true
     random_flip_prob: 0.5
-    random_rotate_prob: 0.5
+    # random_rotate_prob: 0.5
 
 # AutoencoderKL 配置
 autoencoder:
@@ -56,22 +56,24 @@ autoencoder:
     
     # 验证和保存
     val_interval: 10  # 每N个epoch进行验证
-    save_interval: 10  # 每N个epoch保存checkpoint
+    save_interval: 50  # 每N个epoch保存checkpoint
     
     # 快速开发模式
-    fast_dev_run: false  # 如果为true，只运行少量batch用于调试
+    fast_dev_run: true  # 如果为true，只运行少量batch用于调试
     fast_dev_run_batches: 2  # fast_dev_run模式下每个epoch运行的batch数
     
   # Checkpoint路径
   checkpoints:
-    output_dir: "outputs/autoencoder"
+    output_dir: "outputs/ckpt/autoencoder"
     save_best: true  # 是否保存最佳模型
     resume_from: null  # 恢复训练的checkpoint路径，null表示从头开始
   
   # 日志配置
   logging:
-    log_dir: "logs/autoencoder"
-    log_interval: 10  # 每N个batch记录一次日志
+    log_dir: "outputs/logs/autoencoder"
+    log_interval: 50  # 每N个batch记录一次日志
+    visualize_interval: 10  # 每N个epoch可视化一次重建结果
+    num_visualize_samples: 4  # 可视化的样本数量
 
 # Diffusion Model 配置
 diffusion:
@@ -99,27 +101,29 @@ diffusion:
     
     # 验证和保存
     val_interval: 10
-    save_interval: 10
+    save_interval: 50
     
     # 样本生成
-    generate_samples_interval: 20  # 每N个epoch生成样本用于监控
+    generate_samples_interval: 10  # 每N个epoch生成样本用于监控
     num_samples_to_generate: 4  # 生成的样本数量
     
     # 快速开发模式
-    fast_dev_run: false
+    fast_dev_run: true
     fast_dev_run_batches: 2
   
   # Checkpoint路径
   checkpoints:
-    autoencoder_path: "outputs/autoencoder/best_model.pt"  # 预训练的autoencoder
-    output_dir: "outputs/diffusion"
+    autoencoder_path: "outputs/ckpt/autoencoder/best_model.pt"  # 预训练的autoencoder
+    output_dir: "outputs/ckpt/diffusion"
     save_best: true
     resume_from: null
   
   # 日志配置
   logging:
-    log_dir: "logs/diffusion"
-    log_interval: 10
+    log_dir: "outputs/logs/diffusion"
+    log_interval: 20
+    visualize_interval: 10  # 每N个epoch可视化一次生成样本与真实样本的对比
+    num_visualize_samples: 4  # 可视化的样本数量
 
 # 采样配置
 sampling:
@@ -127,12 +131,12 @@ sampling:
   num_samples: 16  # 一次生成的样本数量
   
   # 输出配置
-  output_dir: "outputs/samples"
+  output_dir: "outputs/samples/diffusion"
   save_format: "nifti"  # "nifti" 或 "pointcloud"
   
   # 点云转换配置（如果save_format包含pointcloud）
   pointcloud:
-    num_points: 10000
+    num_points: 100000
     threshold: 0.1
     method: "probabilistic"  # "probabilistic", "center", "random", "weighted"
 

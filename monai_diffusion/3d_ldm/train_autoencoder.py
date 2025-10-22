@@ -11,6 +11,7 @@ import argparse
 import logging
 from tqdm import tqdm
 import yaml
+import shutil
 
 # 添加GenerativeModels到Python路径
 project_root = Path(__file__).parent.parent.parent
@@ -22,6 +23,7 @@ import torch.nn.functional as F
 from torch.nn import L1Loss
 from torch.utils.tensorboard import SummaryWriter
 from monai.utils import set_determinism
+import numpy as np
 
 from generative.losses import PatchAdversarialLoss, PerceptualLoss
 from generative.networks.nets import AutoencoderKL, PatchDiscriminator
@@ -113,7 +115,9 @@ def validate(
     autoencoder: torch.nn.Module,
     val_loader,
     device: torch.device,
-    kl_weight: float
+    kl_weight: float,
+    fast_dev_run: bool,
+    fast_dev_run_batches: int
 ):
     """验证函数"""
     autoencoder.eval()
@@ -121,8 +125,14 @@ def validate(
     val_recon_loss = 0
     val_kl_loss = 0
     
+    progress_bar = tqdm(val_loader, total=len(val_loader), ncols=120)
+    progress_bar.set_description(f"Validating...")
+    
     with torch.no_grad():
-        for batch in val_loader:
+        for step, batch in enumerate(progress_bar):
+            if fast_dev_run and step >= fast_dev_run_batches:
+                break
+            
             images = batch["image"].to(device)
             
             reconstruction, z_mu, z_sigma = autoencoder(images)
@@ -135,9 +145,81 @@ def validate(
             val_loss += loss.item()
             val_recon_loss += recons_loss.item()
             val_kl_loss += kl.item()
-    
+            
+            progress_bar.set_postfix({
+                "loss": f"{val_loss / (step + 1):.4f}",
+                "recon": f"{val_recon_loss / (step + 1):.4f}",
+                "kl": f"{val_kl_loss / (step + 1):.4f}"
+            })
     n_batches = len(val_loader)
     return val_loss / n_batches, val_recon_loss / n_batches, val_kl_loss / n_batches
+
+
+def visualize_reconstruction(
+    autoencoder: torch.nn.Module,
+    val_loader,
+    device: torch.device,
+    writer: SummaryWriter,
+    epoch: int,
+    num_samples: int = 4
+):
+    """
+    可视化重建结果
+    
+    将验证集的前num_samples个样本的输入和重建结果在z方向堆叠，
+    传递给TensorBoard进行可视化。
+    
+    Args:
+        autoencoder: AutoencoderKL模型
+        val_loader: 验证数据加载器
+        device: 设备
+        writer: TensorBoard writer
+        epoch: 当前epoch
+        num_samples: 可视化的样本数量
+    """
+    autoencoder.eval()
+    
+    with torch.no_grad():
+        # 获取第一个batch
+        batch = next(iter(val_loader))
+        images = batch["image"].to(device)
+        
+        # 只取前num_samples个样本
+        images = images[:num_samples]
+        
+        # 通过autoencoder获取重建结果
+        reconstruction, _, _ = autoencoder(images)
+        
+        # 移到CPU并转换为numpy
+        images_np = images.cpu().numpy()  # (B, C, H, W, D)
+        reconstruction_np = reconstruction.cpu().numpy()
+        
+        # 对每个样本进行可视化
+        for i in range(min(num_samples, images_np.shape[0])):
+            # 取出单个样本 (C, H, W, D)
+            input_vol = images_np[i, 0]  # (H, W, D)
+            recon_vol = reconstruction_np[i, 0]  # (H, W, D)
+            
+            # 将3D体素沿z轴投影成2D图像（累加所有z层）
+            input_proj = np.sum(input_vol, axis=2)  # (H, W)
+            recon_proj = np.sum(recon_vol, axis=2)  # (H, W)
+            
+            # 分别归一化输入和重建投影
+            input_proj = (input_proj - input_proj.min()) / (input_proj.max() - input_proj.min() + 1e-8)
+            recon_proj = (recon_proj - recon_proj.min()) / (recon_proj.max() - recon_proj.min() + 1e-8)
+            
+            # 垂直堆叠输入和重建结果
+            combined = np.hstack([input_proj, recon_proj])  # (H, 2*W)
+            
+            # 添加到TensorBoard
+            writer.add_image(
+                f"reconstruction/sample_{i}",
+                combined,
+                epoch,
+                dataformats='HW'
+            )
+        
+        logger.info(f"已保存 {min(num_samples, images_np.shape[0])} 个重建可视化结果到TensorBoard")
 
 
 def train_autoencoder(config_path: str):
@@ -149,6 +231,27 @@ def train_autoencoder(config_path: str):
     """
     # 加载配置
     config = load_config(config_path)
+    
+    # 提取配置参数
+    ae_config = config['autoencoder']
+    checkpoint_config = ae_config['checkpoints']
+    log_config = ae_config['logging']
+    
+    # 清理之前的输出目录
+    output_dir = Path(checkpoint_config['output_dir'])
+    log_dir = Path(log_config['log_dir'])
+    
+    if output_dir.exists():
+        logger.info(f"删除之前的输出目录: {output_dir}")
+        shutil.rmtree(output_dir)
+    
+    if log_dir.exists():
+        logger.info(f"删除之前的日志目录: {log_dir}")
+        shutil.rmtree(log_dir)
+    
+    # 创建新的目录
+    output_dir.mkdir(parents=True, exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
     
     # 设置随机种子
     set_determinism(config.get('seed', 42))
@@ -162,11 +265,8 @@ def train_autoencoder(config_path: str):
     # 创建数据加载器
     train_loader, val_loader = create_train_val_dataloaders(config)
     
-    # 提取配置参数
-    ae_config = config['autoencoder']
+    # 提取训练配置参数
     train_config = ae_config['training']
-    checkpoint_config = ae_config['checkpoints']
-    log_config = ae_config['logging']
     
     # 创建AutoencoderKL
     autoencoder = AutoencoderKL(
@@ -222,8 +322,6 @@ def train_autoencoder(config_path: str):
     )
     
     # TensorBoard
-    log_dir = Path(log_config['log_dir'])
-    log_dir.mkdir(parents=True, exist_ok=True)
     writer = SummaryWriter(log_dir=str(log_dir))
     
     # 训练参数
@@ -231,6 +329,8 @@ def train_autoencoder(config_path: str):
     val_interval = train_config['val_interval']
     save_interval = train_config['save_interval']
     log_interval = log_config['log_interval']
+    visualize_interval = log_config.get('visualize_interval', 10)  # 默认每10个epoch可视化一次
+    num_visualize_samples = log_config.get('num_visualize_samples', 4)  # 默认可视化4个样本
     
     # 快速开发模式
     fast_dev_run = train_config.get('fast_dev_run', False)
@@ -238,7 +338,12 @@ def train_autoencoder(config_path: str):
     
     if fast_dev_run:
         logger.info(f"**快速开发模式**: 每个epoch只运行 {fast_dev_run_batches} 个batch")
-        n_epochs = 2  # 快速模式只运行2个epoch
+        n_epochs = 5  # 快速模式只运行2个epoch
+        val_interval = 1
+        save_interval = 1
+        log_interval = 1
+        visualize_interval = 1
+        num_visualize_samples = 2
     
     # 恢复训练
     start_epoch = 0
@@ -328,12 +433,12 @@ def train_autoencoder(config_path: str):
             # TensorBoard日志
             if step % log_interval == 0:
                 global_step = epoch * len(train_loader) + step
-                writer.add_scalar("train/total_loss", loss_g.item(), global_step)
-                writer.add_scalar("train/recon_loss", recons_loss.item(), global_step)
-                writer.add_scalar("train/kl_loss", kl.item(), global_step)
+                writer.add_scalar("train/step/total_loss", loss_g.item(), global_step)
+                writer.add_scalar("train/step/recon_loss", recons_loss.item(), global_step)
+                writer.add_scalar("train/step/kl_loss", kl.item(), global_step)
                 if epoch >= autoencoder_warm_up_n_epochs:
-                    writer.add_scalar("train/gen_loss", generator_loss.item(), global_step)
-                    writer.add_scalar("train/disc_loss", discriminator_loss.item(), global_step)
+                    writer.add_scalar("train/step/gen_loss", generator_loss.item(), global_step)
+                    writer.add_scalar("train/step/disc_loss", discriminator_loss.item(), global_step)
         
         # 记录epoch平均损失
         n_steps = step + 1
@@ -341,21 +446,21 @@ def train_autoencoder(config_path: str):
         avg_recon = epoch_recon_loss / n_steps
         avg_kl = epoch_kl_loss / n_steps
         
-        writer.add_scalar("epoch/train_loss", avg_loss, epoch)
-        writer.add_scalar("epoch/train_recon", avg_recon, epoch)
-        writer.add_scalar("epoch/train_kl", avg_kl, epoch)
+        writer.add_scalar("train/epoch/total_loss", avg_loss, epoch)
+        writer.add_scalar("train/epoch/recon_loss", avg_recon, epoch)
+        writer.add_scalar("train/epoch/kl_loss", avg_kl, epoch)
         
         logger.info(f"Epoch {epoch} 训练损失: total={avg_loss:.4f}, recon={avg_recon:.4f}, kl={avg_kl:.4f}")
         
         # 验证
         if (epoch + 1) % val_interval == 0 or epoch == n_epochs - 1:
             val_loss, val_recon, val_kl = validate(
-                autoencoder, val_loader, device, kl_weight
+                autoencoder, val_loader, device, kl_weight, fast_dev_run, fast_dev_run_batches
             )
             
-            writer.add_scalar("epoch/val_loss", val_loss, epoch)
-            writer.add_scalar("epoch/val_recon", val_recon, epoch)
-            writer.add_scalar("epoch/val_kl", val_kl, epoch)
+            writer.add_scalar("val/epoch/total_loss", val_loss, epoch)
+            writer.add_scalar("val/epoch/recon_loss", val_recon, epoch)
+            writer.add_scalar("val/epoch/kl_loss", val_kl, epoch)
             
             logger.info(f"Epoch {epoch} 验证损失: total={val_loss:.4f}, recon={val_recon:.4f}, kl={val_kl:.4f}")
             
@@ -366,6 +471,13 @@ def train_autoencoder(config_path: str):
                 logger.info(f"新的最佳验证损失: {best_val_loss:.4f}")
         else:
             is_best = False
+        
+        # 可视化重建结果
+        if (epoch + 1) % visualize_interval == 0 or epoch == n_epochs - 1:
+            logger.info("生成重建可视化结果...")
+            visualize_reconstruction(
+                autoencoder, val_loader, device, writer, epoch, num_visualize_samples
+            )
         
         # 保存checkpoint
         if (epoch + 1) % save_interval == 0 or epoch == n_epochs - 1 or is_best:

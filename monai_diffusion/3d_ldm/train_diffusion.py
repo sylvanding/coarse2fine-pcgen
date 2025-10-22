@@ -11,6 +11,7 @@ import argparse
 import logging
 from tqdm import tqdm
 import yaml
+import shutil
 
 # 添加GenerativeModels到Python路径
 project_root = Path(__file__).parent.parent.parent
@@ -22,6 +23,7 @@ import torch.nn.functional as F
 from torch.cuda.amp import GradScaler, autocast
 from torch.utils.tensorboard import SummaryWriter
 from monai.utils import set_determinism, first
+import numpy as np
 
 from generative.inferers import LatentDiffusionInferer
 from generative.networks.nets import AutoencoderKL, DiffusionModelUNet
@@ -220,6 +222,87 @@ def generate_samples(
     return synthetic_images
 
 
+def visualize_samples(
+    unet: torch.nn.Module,
+    autoencoder: torch.nn.Module,
+    inferer: LatentDiffusionInferer,
+    scheduler,
+    val_loader,
+    latent_shape: tuple,
+    device: torch.device,
+    writer: SummaryWriter,
+    epoch: int,
+    num_samples: int = 4
+):
+    """
+    可视化生成样本与真实样本的对比
+    
+    将验证集的前num_samples个真实样本和生成的样本在z方向堆叠，
+    传递给TensorBoard进行可视化。
+    
+    Args:
+        unet: Diffusion UNet模型
+        autoencoder: AutoencoderKL模型
+        inferer: LatentDiffusionInferer
+        scheduler: 调度器
+        val_loader: 验证数据加载器
+        latent_shape: 潜在空间形状
+        device: 设备
+        writer: TensorBoard writer
+        epoch: 当前epoch
+        num_samples: 可视化的样本数量
+    """
+    unet.eval()
+    autoencoder.eval()
+    
+    with torch.no_grad():
+        # 获取真实样本
+        batch = next(iter(val_loader))
+        real_images = batch["image"].to(device)[:num_samples]
+        
+        # 生成合成样本
+        noise = torch.randn((num_samples, *latent_shape)).to(device)
+        scheduler.set_timesteps(num_inference_steps=50)  # 使用较少的步数加快可视化
+        
+        synthetic_images = inferer.sample(
+            input_noise=noise,
+            autoencoder_model=autoencoder,
+            diffusion_model=unet,
+            scheduler=scheduler
+        )
+        
+        # 移到CPU并转换为numpy
+        real_images_np = real_images.cpu().numpy()  # (B, C, H, W, D)
+        synthetic_images_np = synthetic_images.cpu().numpy()
+        
+        # 对每个样本进行可视化
+        for i in range(min(num_samples, real_images_np.shape[0])):
+            # 取出单个样本 (C, H, W, D)
+            real_vol = real_images_np[i, 0]  # (H, W, D)
+            synthetic_vol = synthetic_images_np[i, 0]  # (H, W, D)
+            
+            # 将3D体素沿z轴投影成2D图像（累加所有z层）
+            real_proj = np.sum(real_vol, axis=2)  # (H, W)
+            synthetic_proj = np.sum(synthetic_vol, axis=2)  # (H, W)
+            
+            # 分别归一化真实样本和生成样本的投影
+            real_proj = (real_proj - real_proj.min()) / (real_proj.max() - real_proj.min() + 1e-8)
+            synthetic_proj = (synthetic_proj - synthetic_proj.min()) / (synthetic_proj.max() - synthetic_proj.min() + 1e-8)
+            
+            # 垂直堆叠真实样本和生成样本
+            combined = np.hstack([real_proj, synthetic_proj])  # (H, 2*W)
+            
+            # 添加到TensorBoard
+            writer.add_image(
+                f"comparison/sample_{i}",
+                combined,
+                epoch,
+                dataformats='HW'
+            )
+        
+        logger.info(f"已保存 {min(num_samples, real_images_np.shape[0])} 个对比可视化结果到TensorBoard")
+
+
 def train_diffusion(config_path: str):
     """
     训练Diffusion Model
@@ -229,6 +312,27 @@ def train_diffusion(config_path: str):
     """
     # 加载配置
     config = load_config(config_path)
+    
+    # 提取配置参数
+    diff_config = config['diffusion']
+    checkpoint_config = diff_config['checkpoints']
+    log_config = diff_config['logging']
+    
+    # 清理之前的输出目录
+    output_dir = Path(checkpoint_config['output_dir'])
+    log_dir = Path(log_config['log_dir'])
+    
+    if output_dir.exists():
+        logger.info(f"删除之前的输出目录: {output_dir}")
+        shutil.rmtree(output_dir)
+    
+    if log_dir.exists():
+        logger.info(f"删除之前的日志目录: {log_dir}")
+        shutil.rmtree(log_dir)
+    
+    # 创建新的目录
+    output_dir.mkdir(parents=True, exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
     
     # 设置随机种子
     set_determinism(config.get('seed', 42))
@@ -244,12 +348,9 @@ def train_diffusion(config_path: str):
     # 创建数据加载器
     train_loader, val_loader = create_train_val_dataloaders(config)
     
-    # 提取配置参数
+    # 提取其他配置参数
     ae_config = config['autoencoder']
-    diff_config = config['diffusion']
     train_config = diff_config['training']
-    checkpoint_config = diff_config['checkpoints']
-    log_config = diff_config['logging']
     scheduler_config = diff_config['scheduler']
     
     # 加载预训练的AutoencoderKL
@@ -301,8 +402,6 @@ def train_diffusion(config_path: str):
     scaler = GradScaler() if mixed_precision else None
     
     # TensorBoard
-    log_dir = Path(log_config['log_dir'])
-    log_dir.mkdir(parents=True, exist_ok=True)
     writer = SummaryWriter(log_dir=str(log_dir))
     
     # 训练参数
@@ -310,8 +409,8 @@ def train_diffusion(config_path: str):
     val_interval = train_config['val_interval']
     save_interval = train_config['save_interval']
     log_interval = log_config['log_interval']
-    generate_samples_interval = train_config.get('generate_samples_interval', 20)
-    num_samples_to_generate = train_config.get('num_samples_to_generate', 4)
+    visualize_interval = log_config.get('visualize_interval', 10)  # 默认每10个epoch可视化一次
+    num_visualize_samples = log_config.get('num_visualize_samples', 4)  # 默认可视化4个样本
     
     # 快速开发模式
     fast_dev_run = train_config.get('fast_dev_run', False)
@@ -319,7 +418,12 @@ def train_diffusion(config_path: str):
     
     if fast_dev_run:
         logger.info(f"**快速开发模式**: 每个epoch只运行 {fast_dev_run_batches} 个batch")
-        n_epochs = 2  # 快速模式只运行2个epoch
+        n_epochs = 5  # 快速模式只运行2个epoch
+        val_interval = 1
+        save_interval = 1
+        log_interval = 1
+        visualize_interval = 1
+        num_visualize_samples = 2
     
     # 恢复训练
     start_epoch = 0
@@ -402,18 +506,18 @@ def train_diffusion(config_path: str):
             # TensorBoard日志
             if step % log_interval == 0:
                 global_step = epoch * len(train_loader) + step
-                writer.add_scalar("train/loss", loss.item(), global_step)
+                writer.add_scalar("train/step/loss", loss.item(), global_step)
         
         # 记录epoch平均损失
         n_steps = step + 1
         avg_loss = epoch_loss / n_steps
-        writer.add_scalar("epoch/train_loss", avg_loss, epoch)
+        writer.add_scalar("train/epoch/loss", avg_loss, epoch)
         logger.info(f"Epoch {epoch} 训练损失: {avg_loss:.4f}")
         
         # 验证
         if (epoch + 1) % val_interval == 0 or epoch == n_epochs - 1:
             val_loss = validate(unet, autoencoder, inferer, val_loader, device)
-            writer.add_scalar("epoch/val_loss", val_loss, epoch)
+            writer.add_scalar("val/epoch/loss", val_loss, epoch)
             logger.info(f"Epoch {epoch} 验证损失: {val_loss:.4f}")
             
             # 保存最佳模型
@@ -424,25 +528,13 @@ def train_diffusion(config_path: str):
         else:
             is_best = False
         
-        # 生成样本
-        if (epoch + 1) % generate_samples_interval == 0 or epoch == n_epochs - 1:
-            logger.info(f"生成 {num_samples_to_generate} 个样本...")
-            synthetic_images = generate_samples(
-                unet, autoencoder, inferer, scheduler,
-                num_samples_to_generate, latent_shape, device
+        # 可视化生成样本与真实样本的对比
+        if (epoch + 1) % visualize_interval == 0 or epoch == n_epochs - 1:
+            logger.info("生成对比可视化结果...")
+            visualize_samples(
+                unet, autoencoder, inferer, scheduler, val_loader,
+                latent_shape, device, writer, epoch, num_visualize_samples
             )
-            
-            # 将样本添加到TensorBoard
-            # 取中间切片进行可视化
-            for i in range(min(num_samples_to_generate, 4)):
-                img = synthetic_images[i, 0].cpu().numpy()
-                mid_slice = img.shape[2] // 2
-                writer.add_image(
-                    f"samples/sample_{i}",
-                    img[:, :, mid_slice],
-                    epoch,
-                    dataformats='HW'
-                )
         
         # 保存checkpoint
         if (epoch + 1) % save_interval == 0 or epoch == n_epochs - 1 or is_best:

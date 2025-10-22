@@ -211,3 +211,4 @@ self-sample/
 test_correspondence/
 validation_outputs/
 refine-exp*/
+outputs/
