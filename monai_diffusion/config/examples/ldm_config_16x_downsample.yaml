@@ -1,0 +1,143 @@
+# MONAI 3D Latent Diffusion Model 配置示例
+# 16倍下采样配置 - 推荐用于512x512x128或更大分辨率
+
+# 数据配置
+data:
+  train_data_dir: "/repos/datasets/batch_simulation_microtubule_20251017_2048_nifti/train"
+  val_data_dir: "/repos/datasets/batch_simulation_microtubule_20251017_2048_nifti/val"
+  
+  # 超高分辨率体素
+  voxel_size: [512, 512, 128]  # [X, Y, Z]
+  
+  cache_rate: 0
+  num_workers: 2
+  pin_memory: true
+  
+  augmentation:
+    enabled: true
+    random_flip_prob: 0.5
+
+# AutoencoderKL 配置 - 16倍下采样
+autoencoder:
+  spatial_dims: 3
+  in_channels: 1
+  out_channels: 1
+  
+  # 减少层数和通道数
+  num_channels: [16, 32, 64]
+  
+  # ⭐ 关键配置: 16倍总下采样 (8×2=16)
+  # 输入512×512×128 → Latent 32×32×8
+  downsample_factors: [8, 2]
+  
+  # 增加latent通道数以补偿信息损失
+  latent_channels: 4
+  num_res_blocks: 1
+  norm_num_groups: 16
+  
+  # 只在最后一层使用注意力
+  attention_levels: [false, false, true]
+  
+  training:
+    n_epochs: 500
+    batch_size: 1
+    learning_rate: 1.0e-4
+    
+    # 损失权重
+    adv_weight: 0.01
+    perceptual_weight: 0.001
+    kl_weight: 1.0e-6
+    
+    # 显存优化 - 全部启用
+    use_perceptual_loss: false  # 必须禁用
+    use_gradient_checkpointing: true  # 启用梯度检查点
+    gradient_accumulation_steps: 8  # 大梯度累积
+    
+    autoencoder_warm_up_n_epochs: 5
+    
+    discriminator:
+      num_layers_d: 3
+      num_channels: 16  # 减少判别器通道数
+    
+    val_interval: 10
+    save_interval: 50
+    
+    fast_dev_run: false
+    fast_dev_run_batches: 2
+    
+  checkpoints:
+    output_dir: "outputs/ckpt/autoencoder_16x"
+    save_best: true
+    resume_from: null
+  
+  logging:
+    log_dir: "outputs/logs/autoencoder_16x"
+    log_interval: 50
+    visualize_interval: 10
+    num_visualize_samples: 2  # 减少可视化样本数
+
+# Diffusion Model 配置
+diffusion:
+  spatial_dims: 3
+  in_channels: 4  # 匹配autoencoder的latent_channels
+  out_channels: 4
+  
+  # Diffusion在latent空间工作 (32×32×8)
+  num_channels: [32, 64, 64]
+  attention_levels: [false, true, true]
+  num_head_channels: [0, 64, 64]
+  num_res_blocks: 1
+  
+  scheduler:
+    num_train_timesteps: 1000
+    schedule: "scaled_linear_beta"
+    beta_start: 0.0015
+    beta_end: 0.0195
+  
+  training:
+    n_epochs: 500
+    batch_size: 2
+    learning_rate: 1.0e-4
+    
+    val_interval: 10
+    save_interval: 50
+    
+    generate_samples_interval: 10
+    num_samples_to_generate: 4
+    
+    fast_dev_run: false
+    fast_dev_run_batches: 2
+  
+  checkpoints:
+    autoencoder_path: "outputs/ckpt/autoencoder_16x/best_model.pt"
+    output_dir: "outputs/ckpt/diffusion_16x"
+    save_best: true
+    resume_from: null
+  
+  logging:
+    log_dir: "outputs/logs/diffusion_16x"
+    log_interval: 20
+    visualize_interval: 10
+    num_visualize_samples: 4
+
+# 采样配置
+sampling:
+  num_inference_steps: 1000
+  num_samples: 16
+  
+  output_dir: "outputs/samples/diffusion_16x"
+  save_format: "nifti"
+  
+  pointcloud:
+    num_points: 100000
+    threshold: 0.1
+    method: "probabilistic"
+
+# 设备配置
+device:
+  use_cuda: true
+  gpu_id: 0
+  mixed_precision: true  # ⭐ 必须启用
+
+seed: 42
+

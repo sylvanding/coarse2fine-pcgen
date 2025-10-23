@@ -46,16 +46,18 @@ class Upsample(nn.Module):
         spatial_dims: number of spatial dimensions (1D, 2D, 3D).
         in_channels: number of input channels to the layer.
         use_convtranspose: if True, use ConvTranspose to upsample feature maps in decoder.
+        scale_factor: upsampling factor (default: 2).
     """
 
-    def __init__(self, spatial_dims: int, in_channels: int, use_convtranspose: bool) -> None:
+    def __init__(self, spatial_dims: int, in_channels: int, use_convtranspose: bool, scale_factor: int = 2) -> None:
         super().__init__()
+        self.scale_factor = scale_factor
         if use_convtranspose:
             self.conv = Convolution(
                 spatial_dims=spatial_dims,
                 in_channels=in_channels,
                 out_channels=in_channels,
-                strides=2,
+                strides=scale_factor,
                 kernel_size=3,
                 padding=1,
                 conv_only=True,
@@ -83,7 +85,7 @@ class Upsample(nn.Module):
         if dtype == torch.bfloat16:
             x = x.to(torch.float32)
 
-        x = F.interpolate(x, scale_factor=2.0, mode="nearest")
+        x = F.interpolate(x, scale_factor=float(self.scale_factor), mode="nearest")
 
         # If the input is bfloat16, we cast back to bfloat16
         if dtype == torch.bfloat16:
@@ -100,17 +102,19 @@ class Downsample(nn.Module):
     Args:
         spatial_dims: number of spatial dimensions (1D, 2D, 3D).
         in_channels: number of input channels.
+        stride: downsampling factor (default: 2).
     """
 
-    def __init__(self, spatial_dims: int, in_channels: int) -> None:
+    def __init__(self, spatial_dims: int, in_channels: int, stride: int = 2) -> None:
         super().__init__()
+        self.stride = stride
         self.pad = (0, 1) * spatial_dims
 
         self.conv = Convolution(
             spatial_dims=spatial_dims,
             in_channels=in_channels,
             out_channels=in_channels,
-            strides=2,
+            strides=stride,
             kernel_size=3,
             padding=0,
             conv_only=True,
@@ -327,6 +331,8 @@ class Encoder(nn.Module):
         attention_levels: indicate which level from num_channels contain an attention block.
         with_nonlocal_attn: if True use non-local attention block.
         use_flash_attention: if True, use flash attention for a memory efficient attention mechanism.
+        downsample_factors: sequence of downsampling factors for each level. If None, defaults to 2 for all levels.
+        initial_downsample_factor: downsampling factor for the initial convolution. Default is 1 (no downsampling).
     """
 
     def __init__(
@@ -341,6 +347,8 @@ class Encoder(nn.Module):
         attention_levels: Sequence[bool],
         with_nonlocal_attn: bool = True,
         use_flash_attention: bool = False,
+        downsample_factors: Sequence[int] | None = None,
+        initial_downsample_factor: int = 1,
     ) -> None:
         super().__init__()
         self.spatial_dims = spatial_dims
@@ -351,15 +359,22 @@ class Encoder(nn.Module):
         self.norm_num_groups = norm_num_groups
         self.norm_eps = norm_eps
         self.attention_levels = attention_levels
+        self.initial_downsample_factor = initial_downsample_factor
+        
+        # 默认每层下采样2倍（向后兼容）
+        if downsample_factors is None:
+            self.downsample_factors = [2] * (len(num_channels) - 1)
+        else:
+            self.downsample_factors = list(downsample_factors)
 
         blocks = []
-        # Initial convolution
+        # Initial convolution with optional downsampling
         blocks.append(
             Convolution(
                 spatial_dims=spatial_dims,
                 in_channels=in_channels,
                 out_channels=num_channels[0],
-                strides=1,
+                strides=self.initial_downsample_factor,
                 kernel_size=3,
                 padding=1,
                 conv_only=True,
@@ -396,7 +411,8 @@ class Encoder(nn.Module):
                     )
 
             if not is_final_block:
-                blocks.append(Downsample(spatial_dims=spatial_dims, in_channels=input_channel))
+                stride = self.downsample_factors[i]
+                blocks.append(Downsample(spatial_dims=spatial_dims, in_channels=input_channel, stride=stride))
 
         # Non-local attention block
         if with_nonlocal_attn is True:
@@ -468,6 +484,8 @@ class Decoder(nn.Module):
         with_nonlocal_attn: if True use non-local attention block.
         use_flash_attention: if True, use flash attention for a memory efficient attention mechanism.
         use_convtranspose: if True, use ConvTranspose to upsample feature maps in decoder.
+        upsample_factors: sequence of upsampling factors for each level. If None, defaults to 2 for all levels.
+        initial_upsample_factor: upsampling factor for the final output. Default is 1 (no upsampling).
     """
 
     def __init__(
@@ -483,6 +501,8 @@ class Decoder(nn.Module):
         with_nonlocal_attn: bool = True,
         use_flash_attention: bool = False,
         use_convtranspose: bool = False,
+        upsample_factors: Sequence[int] | None = None,
+        initial_upsample_factor: int = 1,
     ) -> None:
         super().__init__()
         self.spatial_dims = spatial_dims
@@ -493,6 +513,14 @@ class Decoder(nn.Module):
         self.norm_num_groups = norm_num_groups
         self.norm_eps = norm_eps
         self.attention_levels = attention_levels
+        self.initial_upsample_factor = initial_upsample_factor
+        self.use_convtranspose = use_convtranspose
+        
+        # 默认每层上采样2倍（向后兼容），需要反转以匹配decoder的顺序
+        if upsample_factors is None:
+            self.upsample_factors = [2] * (len(num_channels) - 1)
+        else:
+            self.upsample_factors = list(reversed(upsample_factors))
 
         reversed_block_out_channels = list(reversed(num_channels))
 
@@ -572,11 +600,19 @@ class Decoder(nn.Module):
                     )
 
             if not is_final_block:
+                scale_factor = self.upsample_factors[i]
                 blocks.append(
-                    Upsample(spatial_dims=spatial_dims, in_channels=block_in_ch, use_convtranspose=use_convtranspose)
+                    Upsample(spatial_dims=spatial_dims, in_channels=block_in_ch, use_convtranspose=use_convtranspose, scale_factor=scale_factor)
                 )
 
         blocks.append(nn.GroupNorm(num_groups=norm_num_groups, num_channels=block_in_ch, eps=norm_eps, affine=True))
+        
+        # Final upsampling (if initial_upsample_factor > 1)
+        if self.initial_upsample_factor > 1:
+            blocks.append(
+                Upsample(spatial_dims=spatial_dims, in_channels=block_in_ch, use_convtranspose=use_convtranspose, scale_factor=self.initial_upsample_factor)
+            )
+        
         blocks.append(
             Convolution(
                 spatial_dims=spatial_dims,
@@ -618,6 +654,12 @@ class AutoencoderKL(nn.Module):
         use_flash_attention: if True, use flash attention for a memory efficient attention mechanism.
         use_checkpointing: if True, use activation checkpointing to save memory.
         use_convtranspose: if True, use ConvTranspose to upsample feature maps in decoder.
+        downsample_factors: sequence of downsampling factors for each level. If None, defaults to 2 for all levels.
+            Example: [2, 2, 2] for 8x total downsampling, [4, 2] for 8x total downsampling with fewer layers.
+        initial_downsample_factor: downsampling factor for the initial encoder convolution. Default is 1 (no initial downsampling).
+            This allows for faster downsampling at the very beginning to save memory.
+            Total downsampling = initial_downsample_factor × prod(downsample_factors).
+            Example: initial_downsample_factor=2 with downsample_factors=[4, 2] gives 2×4×2=16x total downsampling.
     """
 
     def __init__(
@@ -636,6 +678,8 @@ class AutoencoderKL(nn.Module):
         use_flash_attention: bool = False,
         use_checkpointing: bool = False,
         use_convtranspose: bool = False,
+        downsample_factors: Sequence[int] | None = None,
+        initial_downsample_factor: int = 1,
     ) -> None:
         super().__init__()
 
@@ -671,6 +715,8 @@ class AutoencoderKL(nn.Module):
             attention_levels=attention_levels,
             with_nonlocal_attn=with_encoder_nonlocal_attn,
             use_flash_attention=use_flash_attention,
+            downsample_factors=downsample_factors,
+            initial_downsample_factor=initial_downsample_factor,
         )
         self.decoder = Decoder(
             spatial_dims=spatial_dims,
@@ -684,6 +730,8 @@ class AutoencoderKL(nn.Module):
             with_nonlocal_attn=with_decoder_nonlocal_attn,
             use_flash_attention=use_flash_attention,
             use_convtranspose=use_convtranspose,
+            upsample_factors=downsample_factors,
+            initial_upsample_factor=initial_downsample_factor,
         )
         self.quant_conv_mu = Convolution(
             spatial_dims=spatial_dims,

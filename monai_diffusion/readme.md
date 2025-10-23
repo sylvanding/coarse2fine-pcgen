@@ -22,7 +22,7 @@ git clone --depth 1 -b master https://kkgithub.com/sylvanding/coarse2fine-pcgen
 python monai_diffusion/3d_ldm/train_autoencoder.py
 
 # tensorboard logs
-ln -s /hy-tmp/coarse2fine-pcgen/outputs/logs /tb_logs
+ln -s /hy-tmp/coarse2fine-pcgen/outputs/logs /tf_logs/
 ```
 
 #### Ai.Paratera

@@ -270,6 +270,22 @@ def train_autoencoder(config_path: str):
     train_config = ae_config['training']
     
     # 创建AutoencoderKL
+    # 获取downsample_factors（如果配置中存在）
+    downsample_factors = ae_config.get('downsample_factors', None)
+    initial_downsample_factor = ae_config.get('initial_downsample_factor', 1)
+    
+    if downsample_factors is not None:
+        downsample_factors = tuple(downsample_factors)
+        total_downsample = initial_downsample_factor
+        for factor in downsample_factors:
+            total_downsample *= factor
+        logger.info(f"使用自定义下采样因子: initial={initial_downsample_factor}, layers={downsample_factors}")
+        logger.info(f"总下采样倍数: {total_downsample}x")
+    else:
+        # 默认每层2倍下采样
+        total_downsample = initial_downsample_factor * (2 ** (len(ae_config['num_channels']) - 1))
+        logger.info(f"使用默认下采样配置: initial={initial_downsample_factor}, 总下采样倍数: {total_downsample}x")
+    
     autoencoder = AutoencoderKL(
         spatial_dims=ae_config['spatial_dims'],
         in_channels=ae_config['in_channels'],
@@ -278,7 +294,9 @@ def train_autoencoder(config_path: str):
         latent_channels=ae_config['latent_channels'],
         num_res_blocks=ae_config['num_res_blocks'],
         norm_num_groups=ae_config.get('norm_num_groups', 16),
-        attention_levels=tuple(ae_config['attention_levels'])
+        attention_levels=tuple(ae_config['attention_levels']),
+        downsample_factors=downsample_factors,
+        initial_downsample_factor=initial_downsample_factor
     )
     
     # 启用梯度检查点以节省显存
@@ -572,7 +590,7 @@ def main():
     parser.add_argument(
         '--config',
         type=str,
-        default='monai_diffusion/config/ldm_config.yaml',
+        default='monai_diffusion/config/ldm_config_local.yaml',
         help='配置文件路径'
     )
     

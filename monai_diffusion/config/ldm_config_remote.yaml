@@ -4,19 +4,19 @@
 # 数据配置
 data:
   # 训练和验证数据路径
-  train_data_dir: "/repos/datasets/batch_simulation_microtubule_20251017_2048_nifti/train"
-  val_data_dir: "/repos/datasets/batch_simulation_microtubule_20251017_2048_nifti/val"
+  train_data_dir: "/hy-tmp/batch_simulation_microtubule_20251017_2048_nifti/train"
+  val_data_dir: "/hy-tmp/batch_simulation_microtubule_20251017_2048_nifti/val"
   
   # 体素分辨率（训练时的目标分辨率）
   # 可以是单个整数（各向同性）或列表[X, Y, Z]（各向异性）
   # 例如: 64 或 [64, 64, 32] 或 [256, 256, 64]
   # 注意: 分辨率越大，显存占用越高，建议配合混合精度训练和梯度累积使用
-  voxel_size: [64, 64, 32]  # [X, Y, Z]
+  voxel_size: [512, 512, 128]  # [X, Y, Z]
   
   # 数据加载设置
   cache_rate: 0  # 缓存比例，0表示不缓存，1表示全部缓存
   num_workers: 1
-  pin_memory: true
+  pin_memory: false
   
   # 数据增强
   augmentation:
@@ -33,17 +33,36 @@ autoencoder:
   # 注意: num_channels越大，显存占用越高
   # 对于高分辨率（如256x256x64），建议使用较小的通道数，如[16, 32, 64]
   # 对于低分辨率（如64x64x32），可以使用较大的通道数，如[32, 64, 64]
-  num_channels: [32, 64, 64]
+  num_channels: [32, 32, 64]
   latent_channels: 3
   num_res_blocks: 1
-  norm_num_groups: 16
+  norm_num_groups: 8
   # attention_levels: 注意力机制非常占显存，建议只在最后一层使用
-  attention_levels: [false, false, true]
+  attention_levels: [false, false, false]
+  
+  # 下采样因子配置 (新增功能)
+  # downsample_factors: 每层之间的下采样倍数，长度应该是 len(num_channels) - 1
+  # 例如: [2, 2] 表示两次下采样，总共4倍 (默认)
+  #       [4, 2] 表示第一层下采样4倍，第二层2倍，总共8倍
+  #       [2, 4] 表示第一层下采样2倍，第二层4倍，总共8倍
+  #       [8] 表示一次下采样8倍（需要num_channels只有2个元素）
+  downsample_factors: [2, 2]  # 默认4倍总下采样
+  # downsample_factors: [4, 2]  # 8倍总下采样（推荐用于256x256x64）
+  # downsample_factors: [8, 2]  # 16倍总下采样（推荐用于512x512x128）
+  
+  # ⭐ 初始下采样因子 (新增功能)
+  # initial_downsample_factor: Initial Conv的下采样倍数，在第0层之前就开始下采样
+  # 这样可以更早地减小特征图尺寸，进一步节省显存！
+  # 总下采样倍数 = initial_downsample_factor × downsample_factors的乘积
+  # 例如: initial_downsample_factor=2, downsample_factors=[4, 2] → 总共2×4×2=16倍
+  initial_downsample_factor: 4  # 默认1（不下采样，向后兼容）
+  # initial_downsample_factor: 2  # 初始2倍下采样（推荐用于256x256x64）
+  # initial_downsample_factor: 4  # 初始4倍下采样（推荐用于512x512x128）
   
   # 训练配置
   training:
     n_epochs: 500
-    batch_size: 2  # 对于256x256x64，建议batch_size=1或2
+    batch_size: 1  # 对于256x256x64，建议batch_size=1或2
     learning_rate: 1.0e-4
     
     # 损失权重
@@ -53,7 +72,7 @@ autoencoder:
     
     # 显存优化选项
     use_perceptual_loss: true  # 对于高分辨率，可以设为false以节省显存
-    use_gradient_checkpointing: false  # 启用梯度检查点，可节省显存但会增加训练时间
+    use_gradient_checkpointing: true  # 启用梯度检查点，可节省显存但会增加训练时间
     gradient_accumulation_steps: 1  # 梯度累积步数，增大可模拟更大的batch size
     
     # 对抗训练
