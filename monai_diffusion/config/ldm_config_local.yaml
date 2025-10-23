@@ -13,14 +13,23 @@ data:
   # 注意: 分辨率越大，显存占用越高，建议配合混合精度训练和梯度累积使用
   voxel_size: [64, 64, 32]  # [X, Y, Z]
   
+  # 预处理resize分辨率（在裁剪前先resize到此分辨率）
+  # null表示不进行预resize，直接使用原始分辨率进行后续处理
+  # 如果设置了值，则会在Spacing后先resize到此分辨率，再进行裁剪
+  # 可以是单个整数（各向同性）或列表[X, Y, Z]（各向异性）
+  # 例如: 128 或 [128, 128, 64] 或 null
+  voxel_resize: [512, 512, 128]  # 预处理resize，null表示不进行预resize
+  
   # 数据加载设置
   cache_rate: 0  # 缓存比例，0表示不缓存，1表示全部缓存
-  num_workers: 1
+  num_workers: 0
   pin_memory: false
   
   # 数据增强
   augmentation:
     enabled: true
+    use_patch_based: true  # ⭐ 启用Patch-Based训练
+    use_center_crop_for_val: true  # 验证时使用中心裁剪
     random_flip_prob: 0.5
     # random_rotate_prob: 0.5
 
@@ -55,7 +64,7 @@ autoencoder:
   # 这样可以更早地减小特征图尺寸，进一步节省显存！
   # 总下采样倍数 = initial_downsample_factor × downsample_factors的乘积
   # 例如: initial_downsample_factor=2, downsample_factors=[4, 2] → 总共2×4×2=16倍
-  initial_downsample_factor: 2  # 默认1（不下采样，向后兼容）
+  initial_downsample_factor: 1  # 默认1（不下采样，向后兼容）
   # initial_downsample_factor: 2  # 初始2倍下采样（推荐用于256x256x64）
   # initial_downsample_factor: 4  # 初始4倍下采样（推荐用于512x512x128）
   
@@ -84,8 +93,8 @@ autoencoder:
       num_channels: 32
     
     # 验证和保存
-    val_interval: 10  # 每N个epoch进行验证
-    save_interval: 50  # 每N个epoch保存checkpoint
+    val_interval: 5  # 每N个epoch进行验证
+    save_interval: 10  # 每N个epoch保存checkpoint
     
     # 快速开发模式
     fast_dev_run: true  # 如果为true，只运行少量batch用于调试
@@ -100,9 +109,14 @@ autoencoder:
   # 日志配置
   logging:
     log_dir: "outputs/logs/autoencoder"
-    log_interval: 50  # 每N个batch记录一次日志
-    visualize_interval: 10  # 每N个epoch可视化一次重建结果
+    log_interval: 10  # 每N个batch记录一次日志
+    visualize_interval: 2  # 每N个epoch可视化一次重建结果
     num_visualize_samples: 4  # 可视化的样本数量
+    
+    # 滑动窗口推理配置（用于可视化完整图像重建）
+    use_sliding_window: true  # 是否启用滑动窗口推理进行可视化
+    sliding_window_roi_size: null  # ROI大小，null表示自动使用训练patch大小
+    sliding_window_batch_size: 1  # 滑动窗口推理的批次大小（如果内存不足，可降到1）
 
 # Diffusion Model 配置
 diffusion:

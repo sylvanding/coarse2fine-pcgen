@@ -24,12 +24,14 @@ from torch.nn import L1Loss
 from torch.utils.tensorboard import SummaryWriter
 from torch.cuda.amp import autocast, GradScaler
 from monai.utils import set_determinism
+from monai import transforms
 import numpy as np
 
 from generative.losses import PatchAdversarialLoss, PerceptualLoss
 from generative.networks.nets import AutoencoderKL, PatchDiscriminator
 
 from monai_diffusion.datasets import create_train_val_dataloaders
+from monai_diffusion.utils.sliding_window_inference import AutoencoderSlidingWindowInferer
 
 # 配置日志
 logging.basicConfig(
@@ -156,31 +158,152 @@ def validate(
     return val_loss / n_batches, val_recon_loss / n_batches, val_kl_loss / n_batches
 
 
+def create_full_image_dataloader(config: dict, num_samples: int = 4, num_workers: int = 0, pin_memory: bool = False):
+    """
+    创建用于加载完整图像（不裁剪）的数据加载器
+    
+    Args:
+        config: 配置字典
+        num_samples: 加载的样本数量
+        num_workers: DataLoader工作进程数（默认0避免共享内存问题）
+        pin_memory: 是否使用固定内存（默认False节省内存）
+        
+    Returns:
+        DataLoader: 完整图像数据加载器
+    """
+    from monai.data import Dataset
+    from torch.utils.data import DataLoader
+    
+    data_config = config['data']
+    val_dir = Path(data_config['val_data_dir'])
+    
+    # 收集NIfTI文件
+    nifti_files = []
+    for pattern in ['*.nii', '*.nii.gz']:
+        nifti_files.extend(val_dir.glob(pattern))
+    nifti_files.sort()
+    
+    # 只取前num_samples个
+    nifti_files = nifti_files[:num_samples]
+    
+    logger.info(f"创建完整图像数据加载器，共 {len(nifti_files)} 个样本")
+    
+    # 获取voxel_resize配置
+    data_config = config['data']
+    voxel_resize = data_config.get('voxel_resize', None)
+    
+    # 处理voxel_resize
+    if voxel_resize is not None:
+        if isinstance(voxel_resize, (list, tuple)):
+            if len(voxel_resize) != 3:
+                raise ValueError(f"voxel_resize作为列表时必须包含3个元素[X, Y, Z]，但得到了{len(voxel_resize)}个元素")
+            voxel_resize_tuple = tuple(voxel_resize)
+        else:
+            voxel_resize_tuple = (voxel_resize, voxel_resize, voxel_resize)
+        logger.info(f"完整图像将先resize到: {voxel_resize_tuple}")
+    else:
+        voxel_resize_tuple = None
+        logger.info("完整图像不进行预resize")
+    
+    # 创建transforms（根据是否有voxel_resize调整流程）
+    transform_list = [
+        transforms.LoadImaged(keys=["image"]),
+        transforms.EnsureChannelFirstd(keys=["image"]),
+        transforms.Spacingd(
+            keys=["image"],
+            pixdim=(1.0, 1.0, 1.0),
+            mode="bilinear"
+        ),
+    ]
+    
+    # 如果配置了voxel_resize，添加resize变换
+    if voxel_resize_tuple is not None:
+        transform_list.append(
+            transforms.Resized(
+                keys=["image"],
+                spatial_size=voxel_resize_tuple,
+                mode="trilinear"
+            )
+        )
+    
+    # 添加归一化和类型转换
+    transform_list.extend([
+        # 归一化到[-1, 1]
+        transforms.ScaleIntensityRanged(
+            keys="image",
+            a_min=0.0,
+            a_max=255.0,
+            b_min=-1.0,
+            b_max=1.0,
+            clip=True
+        ),
+        transforms.EnsureTyped(keys=["image"], dtype=torch.float32)
+    ])
+    
+    full_image_transforms = transforms.Compose(transform_list)
+    
+    # 创建数据列表
+    data_list = [{"image": str(f)} for f in nifti_files]
+    
+    # 创建数据集
+    full_image_dataset = Dataset(
+        data=data_list,
+        transform=full_image_transforms
+    )
+    
+    # 创建数据加载器（batch_size=1，因为完整图像大小可能不一致）
+    # 使用num_workers=0避免多进程共享内存问题
+    full_image_loader = DataLoader(
+        full_image_dataset,
+        batch_size=1,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory
+    )
+    
+    logger.info(f"DataLoader配置: num_workers={num_workers}, pin_memory={pin_memory}")
+    
+    return full_image_loader
+
+
 def visualize_reconstruction(
     autoencoder: torch.nn.Module,
     val_loader,
     device: torch.device,
     writer: SummaryWriter,
     epoch: int,
-    num_samples: int = 4
+    config: dict,
+    num_samples: int = 4,
+    use_sliding_window: bool = True,
+    roi_size: tuple = None,
+    sw_batch_size: int = 4
 ):
     """
     可视化重建结果
     
-    将验证集的前num_samples个样本的输入和重建结果在z方向堆叠，
-    传递给TensorBoard进行可视化。
+    分两部分：
+    1. 使用patch-based验证集进行直接重建
+    2. 创建完整图像数据加载器，使用滑动窗口推理重建
     
     Args:
         autoencoder: AutoencoderKL模型
-        val_loader: 验证数据加载器
+        val_loader: 验证数据加载器（patch-based）
         device: 设备
         writer: TensorBoard writer
         epoch: 当前epoch
+        config: 配置字典
         num_samples: 可视化的样本数量
+        use_sliding_window: 是否使用滑动窗口推理（用于完整图像）
+        roi_size: 滑动窗口的ROI大小，如果为None则使用patch大小
+        sw_batch_size: 滑动窗口批次大小
     """
     autoencoder.eval()
     
     with torch.no_grad():
+        # ============ 第一部分：Patch-based直接重建 ============
+        logger.info("=" * 60)
+        logger.info("第一部分：Patch-based直接重建")
+        
         # 获取第一个batch
         batch = next(iter(val_loader))
         images = batch["image"].to(device)
@@ -188,39 +311,161 @@ def visualize_reconstruction(
         # 只取前num_samples个样本
         images = images[:num_samples]
         
-        # 通过autoencoder获取重建结果
-        reconstruction, _, _ = autoencoder(images)
+        logger.info(f"输入patch形状: {images.shape}")
+        
+        # 直接重建（patch-based）
+        reconstruction_direct, _, _ = autoencoder(images)
         
         # 移到CPU并转换为numpy
         images_np = images.cpu().numpy()  # (B, C, H, W, D)
-        reconstruction_np = reconstruction.cpu().numpy()
+        reconstruction_direct_np = reconstruction_direct.cpu().numpy()
         
-        # 对每个样本进行可视化
+        # 可视化patch重建结果
         for i in range(min(num_samples, images_np.shape[0])):
             # 取出单个样本 (C, H, W, D)
             input_vol = images_np[i, 0]  # (H, W, D)
-            recon_vol = reconstruction_np[i, 0]  # (H, W, D)
+            recon_vol = reconstruction_direct_np[i, 0]  # (H, W, D)
             
             # 将3D体素沿z轴投影成2D图像（累加所有z层）
             input_proj = np.sum(input_vol, axis=2)  # (H, W)
             recon_proj = np.sum(recon_vol, axis=2)  # (H, W)
             
-            # 分别归一化输入和重建投影
+            # 归一化
             input_proj = (input_proj - input_proj.min()) / (input_proj.max() - input_proj.min() + 1e-8)
             recon_proj = (recon_proj - recon_proj.min()) / (recon_proj.max() - recon_proj.min() + 1e-8)
             
-            # 垂直堆叠输入和重建结果
+            # 水平堆叠: 输入 | 重建
             combined = np.hstack([input_proj, recon_proj])  # (H, 2*W)
             
             # 添加到TensorBoard
             writer.add_image(
-                f"reconstruction/sample_{i}",
+                f"patch_reconstruction/sample_{i}",
                 combined,
                 epoch,
                 dataformats='HW'
             )
+            
+            # 误差图
+            error = np.abs(input_proj - recon_proj)
+            writer.add_image(
+                f"patch_reconstruction/sample_{i}_error",
+                error,
+                epoch,
+                dataformats='HW'
+            )
         
-        logger.info(f"已保存 {min(num_samples, images_np.shape[0])} 个重建可视化结果到TensorBoard")
+        logger.info(f"已保存 {min(num_samples, images_np.shape[0])} 个patch重建可视化结果")
+        
+        # ============ 第二部分：完整图像滑动窗口推理 ============
+        if use_sliding_window:
+            logger.info("=" * 60)
+            logger.info("第二部分：完整图像滑动窗口推理")
+            
+            try:
+                # 清理GPU缓存，释放内存
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    logger.info(f"清理GPU缓存，当前显存使用: {torch.cuda.memory_allocated() / 1024**3:.2f}GB")
+                
+                # 创建完整图像数据加载器（使用内存优化参数）
+                full_image_loader = create_full_image_dataloader(
+                    config, 
+                    num_samples,
+                    num_workers=0,  # 避免共享内存问题
+                    pin_memory=False  # 节省内存
+                )
+                
+                # 推断ROI大小（使用训练patch大小）
+                if roi_size is None:
+                    roi_size = images.shape[2:]  # (H, W, D)
+                    logger.info(f"使用训练patch大小作为滑动窗口ROI: {roi_size}")
+                
+                # 创建滑动窗口推理器
+                sw_inferer = AutoencoderSlidingWindowInferer(
+                    autoencoder=autoencoder,
+                    roi_size=roi_size,
+                    sw_batch_size=sw_batch_size,
+                    overlap=0.25,
+                    mode="gaussian",
+                    device=device
+                )
+                
+                # 对每个完整图像进行滑动窗口推理
+                for idx, batch in enumerate(full_image_loader):
+                    if idx >= num_samples:
+                        break
+                    
+                    try:
+                        full_image = batch["image"].to(device)  # (1, C, H, W, D)
+                        logger.info(f"完整图像 {idx} 形状: {full_image.shape}")
+                        
+                        # 滑动窗口推理
+                        reconstruction_sw = sw_inferer.reconstruct(full_image, return_latent=False)
+                        logger.info(f"滑动窗口重建完成，输出形状: {reconstruction_sw.shape}")
+                        
+                        # 移到CPU并转换为numpy
+                        full_image_np = full_image.cpu().numpy()[0, 0]  # (H, W, D)
+                        reconstruction_sw_np = reconstruction_sw.cpu().numpy()[0, 0]  # (H, W, D)
+                        
+                        # 释放GPU内存
+                        del full_image, reconstruction_sw
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                        
+                        # 将3D体素沿z轴投影成2D图像
+                        full_image_proj = np.sum(full_image_np, axis=2)  # (H, W)
+                        recon_sw_proj = np.sum(reconstruction_sw_np, axis=2)  # (H, W)
+                        
+                        # 归一化
+                        full_image_proj = (full_image_proj - full_image_proj.min()) / (full_image_proj.max() - full_image_proj.min() + 1e-8)
+                        recon_sw_proj = (recon_sw_proj - recon_sw_proj.min()) / (recon_sw_proj.max() - recon_sw_proj.min() + 1e-8)
+                        
+                        # 水平堆叠: 输入完整图像 | 滑动窗口重建
+                        combined = np.hstack([full_image_proj, recon_sw_proj])  # (H, 2*W)
+                        
+                        # 添加到TensorBoard
+                        writer.add_image(
+                            f"full_image_sliding_window/sample_{idx}",
+                            combined,
+                            epoch,
+                            dataformats='HW'
+                        )
+                        
+                        # 误差图
+                        error_sw = np.abs(full_image_proj - recon_sw_proj)
+                        writer.add_image(
+                            f"full_image_sliding_window/sample_{idx}_error",
+                            error_sw,
+                            epoch,
+                            dataformats='HW'
+                        )
+                        
+                        logger.info(f"✓ 完成样本 {idx}")
+                        
+                    except RuntimeError as e:
+                        if "out of memory" in str(e):
+                            logger.error(f"✗ 样本 {idx} 推理失败：GPU显存不足")
+                            logger.error(f"  建议: 1) 减小sw_batch_size (当前={sw_batch_size})")
+                            logger.error(f"        2) 减小ROI大小 (当前={roi_size})")
+                            logger.error(f"        3) 增加GPU显存或使用更小的图像")
+                            # 清理并继续下一个样本
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+                            continue
+                        else:
+                            raise
+                
+                logger.info(f"已保存 {min(idx + 1, num_samples)} 个完整图像滑动窗口重建可视化结果")
+                
+            except Exception as e:
+                logger.error(f"滑动窗口推理过程出错: {e}")
+                logger.error("跳过滑动窗口可视化")
+            finally:
+                # 最终清理
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+        
+        logger.info("=" * 60)
 
 
 def train_autoencoder(config_path: str):
@@ -381,6 +626,11 @@ def train_autoencoder(config_path: str):
     log_interval = log_config['log_interval']
     visualize_interval = log_config.get('visualize_interval', 10)  # 默认每10个epoch可视化一次
     num_visualize_samples = log_config.get('num_visualize_samples', 4)  # 默认可视化4个样本
+    
+    # 滑动窗口推理配置
+    use_sliding_window_vis = log_config.get('use_sliding_window', True)  # 默认启用滑动窗口推理
+    sw_roi_size = log_config.get('sliding_window_roi_size', None)  # None表示自动推断
+    sw_batch_size = log_config.get('sliding_window_batch_size', 4)  # 滑动窗口批次大小
     
     # 快速开发模式
     fast_dev_run = train_config.get('fast_dev_run', False)
@@ -565,7 +815,16 @@ def train_autoencoder(config_path: str):
         if (epoch + 1) % visualize_interval == 0 or epoch == n_epochs - 1:
             logger.info("生成重建可视化结果...")
             visualize_reconstruction(
-                autoencoder, val_loader, device, writer, epoch, num_visualize_samples
+                autoencoder=autoencoder,
+                val_loader=val_loader,
+                device=device,
+                writer=writer,
+                epoch=epoch,
+                config=config,
+                num_samples=num_visualize_samples,
+                use_sliding_window=use_sliding_window_vis,
+                roi_size=sw_roi_size,
+                sw_batch_size=sw_batch_size
             )
         
         # 保存checkpoint
