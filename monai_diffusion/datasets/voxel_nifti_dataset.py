@@ -34,11 +34,12 @@ class VoxelNiftiDataset:
         data_dir: str,
         target_voxel_size = 64,
         voxel_resize = None,
-        normalize_to_minus_one_one: bool = True,
+        normalize_to_minus_one_one: bool = False,
         cache_rate: float = 0.0,
         cache_num_workers: int = 4,
         augmentation: bool = False,
-        augmentation_config: Optional[Dict] = None
+        augmentation_config: Optional[Dict] = None,
+        max_data_size: Optional[int] = None,
     ):
         """
         初始化NIfTI数据集
@@ -52,6 +53,7 @@ class VoxelNiftiDataset:
             cache_num_workers: CacheDataset的工作进程数
             augmentation: 是否启用数据增强
             augmentation_config: 数据增强配置
+            max_data_size: 最大数据大小，None表示不限制
         """
         self.data_dir = Path(data_dir)
         
@@ -88,6 +90,9 @@ class VoxelNiftiDataset:
         
         # 收集所有NIfTI文件
         self.nifti_files = self._collect_nifti_files()
+        if max_data_size is not None and len(self.nifti_files) > max_data_size:
+            self.nifti_files = self.nifti_files[:max_data_size]
+            logger.info(f"限制数据集大小为 {max_data_size} 个样本")
         
         logger.info(f"初始化NIfTI数据集:")
         logger.info(f"  数据目录: {data_dir}")
@@ -173,13 +178,14 @@ class VoxelNiftiDataset:
         
         # ⭐⭐⭐ Patch-Based训练策略
         if self.augmentation:
-            # 训练集：使用随机裁剪（核心优化！）
-            logger.info(f"  训练模式: 使用Patch-Based训练 (随机裁剪patch)")
+            # 训练集
             
             # 检查是否需要使用patch-based训练
             use_patch_based = self.augmentation_config.get('use_patch_based', True)
             
             if use_patch_based:
+                logger.info(f"  训练模式: 使用Patch-Based训练 (随机裁剪patch)")
+                
                 # 方案1：如果原始数据可能小于目标大小，先padding
                 transform_list.append(
                     transforms.SpatialPadd(
@@ -200,15 +206,8 @@ class VoxelNiftiDataset:
             else:
                 # 传统方案：直接resize（速度慢，不推荐）
                 logger.warning("  未启用Patch-Based训练，将直接resize（速度较慢）")
-                transform_list.append(
-                    transforms.Resized(
-                        keys=["image"],
-                        spatial_size=self.target_voxel_size,
-                        mode="trilinear"
-                    )
-                )
             
-            # 数据增强（在裁剪后进行）
+            # 数据增强（在裁剪前进行）
             # 随机翻转
             if self.augmentation_config.get('random_flip_prob', 0) > 0:
                 transform_list.append(
@@ -228,6 +227,15 @@ class VoxelNiftiDataset:
                         spatial_axes=(0, 1)
                     )
                 )
+                
+            # 随机裁剪
+            transform_list.append(
+                transforms.RandSpatialCropd(
+                    keys=["image"],
+                    roi_size=self.target_voxel_size,
+                    random_size=False
+                )
+            )
         else:
             # 验证集：使用中心裁剪或直接resize
             logger.info(f"  验证模式: 使用中心裁剪或resize")
@@ -235,13 +243,13 @@ class VoxelNiftiDataset:
             
             if use_center_crop:
                 # 方案1：中心裁剪（推荐，与训练保持一致）
-                transform_list.append(
-                    transforms.SpatialPadd(
-                        keys=["image"],
-                        spatial_size=self.target_voxel_size,
-                        mode="constant"
-                    )
-                )
+                # transform_list.append(
+                #     transforms.SpatialPadd(
+                #         keys=["image"],
+                #         spatial_size=self.target_voxel_size,
+                #         mode="constant"
+                #     )
+                # )
                 transform_list.append(
                     transforms.CenterSpatialCropd(
                         keys=["image"],
@@ -360,16 +368,20 @@ def create_train_val_dataloaders(
     
     logger.info("创建训练和验证数据集...")
     
+    max_data_size_train = data_config.get('max_data_size_for_train', None)
+    max_data_size_val = data_config.get('max_data_size_for_val', None)
+    
     # 创建训练数据集（启用数据增强）
     train_dataset = VoxelNiftiDataset(
         data_dir=train_dir,
         target_voxel_size=voxel_size_tuple,
         voxel_resize=voxel_resize_tuple,
-        normalize_to_minus_one_one=True,
+        normalize_to_minus_one_one=False,
         cache_rate=cache_rate,
         cache_num_workers=num_workers,
         augmentation=augmentation_enabled,
-        augmentation_config=augmentation_config
+        augmentation_config=augmentation_config,
+        max_data_size=max_data_size_train
     )
     
     # 创建验证数据集（不使用数据增强）
@@ -377,10 +389,11 @@ def create_train_val_dataloaders(
         data_dir=val_dir,
         target_voxel_size=voxel_size_tuple,
         voxel_resize=voxel_resize_tuple,
-        normalize_to_minus_one_one=True,
+        normalize_to_minus_one_one=False,
         cache_rate=cache_rate,
         cache_num_workers=num_workers,
-        augmentation=False
+        augmentation=False,
+        max_data_size=max_data_size_val
     )
     
     # 创建DataLoader

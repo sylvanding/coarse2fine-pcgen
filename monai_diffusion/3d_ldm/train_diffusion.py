@@ -557,7 +557,7 @@ def main():
     parser.add_argument(
         '--config',
         type=str,
-        default='monai_diffusion/config/ldm_config.yaml',
+        default='monai_diffusion/config/ldm_config_local.yaml',
         help='配置文件路径'
     )
     

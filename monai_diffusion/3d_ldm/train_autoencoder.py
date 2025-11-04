@@ -5,6 +5,7 @@ AutoencoderKL训练脚本
 用于Latent Diffusion Model的第一阶段训练。
 """
 
+import os
 import sys
 from pathlib import Path
 import argparse
@@ -12,7 +13,8 @@ import logging
 from tqdm import tqdm
 import yaml
 import shutil
-
+from PIL import Image
+from torch.utils.data import DataLoader
 # 添加GenerativeModels到Python路径
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root / "GenerativeModels"))
@@ -39,6 +41,36 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+def visualize_data_loader(data_loader: DataLoader, data_name: str):
+    # 获取第一个batch
+    cpu_device = torch.device("cpu")
+    batch = next(iter(data_loader))
+    images = batch["image"].to(cpu_device)
+    
+    logger.info(f"输入patch形状: {images.shape}")
+    
+    images_np = images.numpy()  # (B, C, H, W, D)
+    
+    file_path = f"outputs/images_for_data_loader/{data_name}"
+    os.makedirs(file_path, exist_ok=True)
+    
+    # 可视化结果
+    for i in range(images_np.shape[0]):
+        # 取出单个样本 (C, H, W, D)
+        input_vol = images_np[i, 0]  # (H, W, D)
+        
+        # 将3D体素沿z轴投影成2D图像（累加所有z层）
+        input_proj = np.sum(input_vol, axis=2)  # (H, W)
+        
+        # 归一化
+        input_proj = (input_proj - input_proj.min()) / (input_proj.max() - input_proj.min() + 1e-8)
+        
+        # save image
+        image = Image.fromarray(np.uint8(input_proj*255.0))
+        image.save(f"{file_path}/sample_{i}.png")
+        logger.info(f"保存样本 {i} 到 {file_path}/sample_{i}.png")
 
 
 def load_config(config_path: str) -> dict:
@@ -511,6 +543,10 @@ def train_autoencoder(config_path: str):
     # 创建数据加载器
     train_loader, val_loader = create_train_val_dataloaders(config)
     
+    # 渲染第一个batch，验证数据加载器的正确性
+    visualize_data_loader(train_loader, "train")
+    visualize_data_loader(val_loader, "val")
+    
     # 提取训练配置参数
     train_config = ae_config['training']
     
@@ -628,7 +664,7 @@ def train_autoencoder(config_path: str):
     num_visualize_samples = log_config.get('num_visualize_samples', 4)  # 默认可视化4个样本
     
     # 滑动窗口推理配置
-    use_sliding_window_vis = log_config.get('use_sliding_window', True)  # 默认启用滑动窗口推理
+    use_sliding_window_vis = log_config.get('use_sliding_window', False)  # 默认启用滑动窗口推理
     sw_roi_size = log_config.get('sliding_window_roi_size', None)  # None表示自动推断
     sw_batch_size = log_config.get('sliding_window_batch_size', 4)  # 滑动窗口批次大小
     
