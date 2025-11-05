@@ -21,17 +21,18 @@ data:
   voxel_resize: [128, 128, 64]  # 预处理resize，null表示不进行预resize
   
   # 数据加载设置
-  cache_rate: 0.5  # 缓存比例，0表示不缓存，1表示全部缓存
-  num_workers: 8
+  cache_rate: 0.2  # 缓存比例，0表示不缓存，1表示全部缓存
+  num_workers: 4
   pin_memory: false
   max_data_size_for_train: 100
-  max_data_size_for_val: 10
+  max_data_size_for_val: 4
   
   # 数据增强
   augmentation:
     enabled: true
     use_patch_based: false  # ⭐ 启用Patch-Based训练
     use_center_crop_for_val: true  # 验证时使用中心裁剪
+    invert_intensity: false  # 是否对图片亮度进行反转（将最小亮度变成最大，最大亮度变成最小）
     # random_flip_prob: 0.5
     # random_rotate_prob: 0.5
 
@@ -70,6 +71,20 @@ autoencoder:
   # initial_downsample_factor: 2  # 初始2倍下采样（推荐用于256x256x64）
   # initial_downsample_factor: 4  # 初始4倍下采样（推荐用于512x512x128）
   
+  # ⭐ 下采样方法 (新增功能)
+  # use_conv_downsample: 是否使用卷积下采样
+  # true: 使用步幅卷积（可学习参数，表达能力更强，但参数量更多）
+  # false: 使用平均池化（无可学习参数，速度更快，显存占用更少，平滑性更好）
+  # use_conv_downsample: true  # 默认true（使用卷积，向后兼容）
+  use_conv_downsample: true  # 使用平均池化（推荐用于节省显存和加速训练）
+  
+  # ⭐ 上采样方法 (新增功能)
+  # use_convtranspose: 是否使用转置卷积上采样
+  # true: 使用转置卷积（可学习参数，表达能力更强，可能产生棋盘效应）
+  # false: 使用最近邻插值+卷积（默认方式，平滑性更好，无棋盘效应）
+  # use_convtranspose: false  # 默认false（使用插值，向后兼容）
+  use_convtranspose: true  # 使用转置卷积（与下采样方式对称）
+  
   # 训练配置
   training:
     n_epochs: 500
@@ -88,6 +103,25 @@ autoencoder:
     
     # 对抗训练
     autoencoder_warm_up_n_epochs: 599  # 前N个epoch不使用对抗损失
+    
+    # ==================== 去噪自编码器配置 ====================
+    # 启用去噪自编码器模式，让模型学习从噪声中恢复干净图像
+    # 这样可以迫使模型学习数据的深层特征，而不是简单地复制输入
+    denoising:
+      enabled: true  # 是否启用去噪模式
+      noise_type: "mixed"  # 噪声类型: "gaussian", "dropout", "mixed"
+      noise_std: 0.03  # 高斯噪声标准差（对于[0, 1]归一化的图像）
+      dropout_prob: 0.1  # 体素丢弃概率
+      # 
+      # 噪声类型说明:
+      # - gaussian: 添加高斯噪声，适合模拟传感器噪声
+      # - dropout: 随机将一些体素置零，适合模拟数据缺失
+      # - mixed: 同时应用gaussian和dropout，更具挑战性
+      # 
+      # 参数调节建议（注意：数据归一化到[0, 1]范围）:
+      # - 初期训练: noise_std=0.1, dropout_prob=0.05 (较温和)
+      # - 进阶训练: noise_std=0.15, dropout_prob=0.1 (中等难度，推荐)
+      # - 高难度: noise_std=0.2, dropout_prob=0.15 (更具挑战性)
     
     # 判别器配置
     discriminator:

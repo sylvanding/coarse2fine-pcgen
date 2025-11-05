@@ -22,7 +22,7 @@ sys.path.insert(0, str(project_root))
 
 import torch
 import torch.nn.functional as F
-from torch.nn import L1Loss
+from torch.nn import L1Loss, MSELoss
 from torch.utils.tensorboard import SummaryWriter
 from torch.cuda.amp import autocast, GradScaler
 from monai.utils import set_determinism
@@ -41,6 +41,96 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+# ==================== 去噪自编码器：噪声生成函数 ====================
+
+def add_gaussian_noise(images: torch.Tensor, noise_std: float = 0.1) -> torch.Tensor:
+    """
+    添加高斯噪声
+    
+    Args:
+        images: 输入图像张量 (B, C, H, W, D)，值域范围[0, 1]
+        noise_std: 噪声标准差（相对于图像范围）
+        
+    Returns:
+        带噪声的图像张量，值域范围[0, 1]
+    """
+    noise = torch.randn_like(images) * noise_std
+    noisy_images = images + noise
+    # 保持与原始图像相同的值域范围 [0, 1]
+    noisy_images = torch.clamp(noisy_images, 0.0, 1.0)
+    return noisy_images
+
+
+def add_dropout_noise(images: torch.Tensor, dropout_prob: float = 0.1) -> torch.Tensor:
+    """
+    随机丢弃（置零）一些体素
+    
+    Args:
+        images: 输入图像张量 (B, C, H, W, D)，值域范围[0, 1]
+        dropout_prob: 丢弃概率
+        
+    Returns:
+        带噪声的图像张量，值域范围[0, 1]
+    """
+    mask = torch.rand_like(images) > dropout_prob
+    noisy_images = images * mask.float()
+    return noisy_images
+
+
+def add_mixed_noise(
+    images: torch.Tensor, 
+    noise_std: float = 0.1, 
+    dropout_prob: float = 0.05
+) -> torch.Tensor:
+    """
+    混合噪声：同时添加高斯噪声和dropout噪声
+    
+    Args:
+        images: 输入图像张量 (B, C, H, W, D)，值域范围[0, 1]
+        noise_std: 高斯噪声标准差
+        dropout_prob: 丢弃概率
+        
+    Returns:
+        带噪声的图像张量，值域范围[0, 1]
+    """
+    # 先添加dropout
+    noisy_images = add_dropout_noise(images, dropout_prob)
+    # 再添加高斯噪声
+    noisy_images = add_gaussian_noise(noisy_images, noise_std)
+    return noisy_images
+
+
+def add_noise(
+    images: torch.Tensor,
+    noise_type: str = "gaussian",
+    noise_std: float = 0.1,
+    dropout_prob: float = 0.1
+) -> torch.Tensor:
+    """
+    统一的噪声添加接口
+    
+    Args:
+        images: 输入图像张量 (B, C, H, W, D)，值域范围[0, 1]
+        noise_type: 噪声类型，可选 "gaussian", "dropout", "mixed"
+        noise_std: 高斯噪声标准差
+        dropout_prob: dropout概率
+        
+    Returns:
+        带噪声的图像张量，值域范围[0, 1]
+    """
+    if noise_type == "gaussian":
+        return add_gaussian_noise(images, noise_std)
+    elif noise_type == "dropout":
+        return add_dropout_noise(images, dropout_prob)
+    elif noise_type == "mixed":
+        return add_mixed_noise(images, noise_std, dropout_prob)
+    else:
+        raise ValueError(f"不支持的噪声类型: {noise_type}")
+        
+
+# ==================== 原有代码继续 ====================
 
 
 def visualize_data_loader(data_loader: DataLoader, data_name: str):
@@ -152,9 +242,22 @@ def validate(
     device: torch.device,
     kl_weight: float,
     fast_dev_run: bool,
-    fast_dev_run_batches: int
+    fast_dev_run_batches: int,
+    # 去噪参数
+    use_denoising: bool = False,
+    noise_type: str = "gaussian",
+    noise_std: float = 0.1,
+    dropout_prob: float = 0.1
 ):
-    """验证函数"""
+    """
+    验证函数（支持去噪自编码器）
+    
+    Args:
+        use_denoising: 是否使用去噪模式
+        noise_type: 噪声类型
+        noise_std: 高斯噪声标准差
+        dropout_prob: dropout概率
+    """
     autoencoder.eval()
     val_loss = 0
     val_recon_loss = 0
@@ -168,13 +271,27 @@ def validate(
             if fast_dev_run and step >= fast_dev_run_batches:
                 break
             
-            images = batch["image"].to(device)
+            # 原始干净图像
+            clean_images = batch["image"].to(device)
             
-            reconstruction, z_mu, z_sigma = autoencoder(images)
+            # 如果使用去噪模式，给输入添加噪声
+            if use_denoising:
+                noisy_images = add_noise(
+                    clean_images,
+                    noise_type=noise_type,
+                    noise_std=noise_std,
+                    dropout_prob=dropout_prob
+                )
+                # 模型输入：带噪声的图像
+                # 目标输出：原始干净的图像
+                reconstruction, z_mu, z_sigma = autoencoder(noisy_images)
+                recons_loss = F.l1_loss(reconstruction.float(), clean_images.float())
+            else:
+                # 标准自编码器：输入=输出
+                reconstruction, z_mu, z_sigma = autoencoder(clean_images)
+                recons_loss = F.l1_loss(reconstruction.float(), clean_images.float())
             
-            recons_loss = F.l1_loss(reconstruction.float(), images.float())
             kl = KL_loss(z_mu, z_sigma)
-            
             loss = recons_loss + kl_weight * kl
             
             val_loss += loss.item()
@@ -308,10 +425,15 @@ def visualize_reconstruction(
     num_samples: int = 4,
     use_sliding_window: bool = True,
     roi_size: tuple = None,
-    sw_batch_size: int = 4
+    sw_batch_size: int = 4,
+    # 去噪参数
+    use_denoising: bool = False,
+    noise_type: str = "gaussian",
+    noise_std: float = 0.1,
+    dropout_prob: float = 0.1
 ):
     """
-    可视化重建结果
+    可视化重建结果（支持去噪自编码器）
     
     分两部分：
     1. 使用patch-based验证集进行直接重建
@@ -328,65 +450,126 @@ def visualize_reconstruction(
         use_sliding_window: 是否使用滑动窗口推理（用于完整图像）
         roi_size: 滑动窗口的ROI大小，如果为None则使用patch大小
         sw_batch_size: 滑动窗口批次大小
+        use_denoising: 是否使用去噪模式
+        noise_type: 噪声类型
+        noise_std: 高斯噪声标准差
+        dropout_prob: dropout概率
     """
     autoencoder.eval()
     
     with torch.no_grad():
         # ============ 第一部分：Patch-based直接重建 ============
         logger.info("=" * 60)
-        logger.info("第一部分：Patch-based直接重建")
+        if use_denoising:
+            logger.info("第一部分：Patch-based去噪重建")
+            logger.info(f"噪声类型: {noise_type}, 高斯噪声std: {noise_std}, dropout概率: {dropout_prob}")
+        else:
+            logger.info("第一部分：Patch-based直接重建")
         
         # 获取第一个batch
         batch = next(iter(val_loader))
-        images = batch["image"].to(device)
+        clean_images = batch["image"].to(device)
         
         # 只取前num_samples个样本
-        images = images[:num_samples]
+        clean_images = clean_images[:num_samples]
         
-        logger.info(f"输入patch形状: {images.shape}")
+        logger.info(f"输入patch形状: {clean_images.shape}")
         
-        # 直接重建（patch-based）
-        reconstruction_direct, _, _ = autoencoder(images)
-        
-        # 移到CPU并转换为numpy
-        images_np = images.cpu().numpy()  # (B, C, H, W, D)
-        reconstruction_direct_np = reconstruction_direct.cpu().numpy()
-        
-        # 可视化patch重建结果
-        for i in range(min(num_samples, images_np.shape[0])):
-            # 取出单个样本 (C, H, W, D)
-            input_vol = images_np[i, 0]  # (H, W, D)
-            recon_vol = reconstruction_direct_np[i, 0]  # (H, W, D)
-            
-            # 将3D体素沿z轴投影成2D图像（累加所有z层）
-            input_proj = np.sum(input_vol, axis=2)  # (H, W)
-            recon_proj = np.sum(recon_vol, axis=2)  # (H, W)
-            
-            # 归一化
-            input_proj = (input_proj - input_proj.min()) / (input_proj.max() - input_proj.min() + 1e-8)
-            recon_proj = (recon_proj - recon_proj.min()) / (recon_proj.max() - recon_proj.min() + 1e-8)
-            
-            # 水平堆叠: 输入 | 重建
-            combined = np.hstack([input_proj, recon_proj])  # (H, 2*W)
-            
-            # 添加到TensorBoard
-            writer.add_image(
-                f"patch_reconstruction/sample_{i}",
-                combined,
-                epoch,
-                dataformats='HW'
+        # 如果使用去噪模式，添加噪声
+        if use_denoising:
+            noisy_images = add_noise(
+                clean_images,
+                noise_type=noise_type,
+                noise_std=noise_std,
+                dropout_prob=dropout_prob
             )
+            # 模型输入带噪声的图像，目标是恢复干净图像
+            reconstruction_direct, _, _ = autoencoder(noisy_images)
             
-            # 误差图
-            error = np.abs(input_proj - recon_proj)
-            writer.add_image(
-                f"patch_reconstruction/sample_{i}_error",
-                error,
-                epoch,
-                dataformats='HW'
-            )
+            # 移到CPU并转换为numpy
+            noisy_images_np = noisy_images.cpu().numpy()  # (B, C, H, W, D)
+            clean_images_np = clean_images.cpu().numpy()  # (B, C, H, W, D)
+            reconstruction_direct_np = reconstruction_direct.cpu().numpy()
+            
+            # 可视化去噪重建结果
+            for i in range(min(num_samples, clean_images_np.shape[0])):
+                # 取出单个样本 (C, H, W, D)
+                noisy_vol = noisy_images_np[i, 0]  # (H, W, D)
+                clean_vol = clean_images_np[i, 0]  # (H, W, D)
+                recon_vol = reconstruction_direct_np[i, 0]  # (H, W, D)
+                
+                # 将3D体素沿z轴投影成2D图像（累加所有z层）
+                noisy_proj = np.sum(noisy_vol, axis=2)  # (H, W)
+                clean_proj = np.sum(clean_vol, axis=2)  # (H, W)
+                recon_proj = np.sum(recon_vol, axis=2)  # (H, W)
+                
+                # 归一化
+                noisy_proj = (noisy_proj - noisy_proj.min()) / (noisy_proj.max() - noisy_proj.min() + 1e-8)
+                clean_proj = (clean_proj - clean_proj.min()) / (clean_proj.max() - clean_proj.min() + 1e-8)
+                recon_proj = (recon_proj - recon_proj.min()) / (recon_proj.max() - recon_proj.min() + 1e-8)
+                
+                # 水平堆叠: 噪声输入 | 模型重建 | 干净目标
+                combined = np.hstack([noisy_proj, recon_proj, clean_proj])  # (H, 3*W)
+                
+                # 添加到TensorBoard
+                writer.add_image(
+                    f"patch_denoising/sample_{i}",
+                    combined,
+                    epoch,
+                    dataformats='HW'
+                )
+                
+                # 重建误差图：模型输出 vs 干净目标
+                error = np.abs(recon_proj - clean_proj)
+                writer.add_image(
+                    f"patch_denoising/sample_{i}_error",
+                    error,
+                    epoch,
+                    dataformats='HW'
+                )
+        else:
+            # 标准重建模式
+            reconstruction_direct, _, _ = autoencoder(clean_images)
+            
+            # 移到CPU并转换为numpy
+            images_np = clean_images.cpu().numpy()  # (B, C, H, W, D)
+            reconstruction_direct_np = reconstruction_direct.cpu().numpy()
+            
+            # 可视化patch重建结果
+            for i in range(min(num_samples, images_np.shape[0])):
+                # 取出单个样本 (C, H, W, D)
+                input_vol = images_np[i, 0]  # (H, W, D)
+                recon_vol = reconstruction_direct_np[i, 0]  # (H, W, D)
+                
+                # 将3D体素沿z轴投影成2D图像（累加所有z层）
+                input_proj = np.sum(input_vol, axis=2)  # (H, W)
+                recon_proj = np.sum(recon_vol, axis=2)  # (H, W)
+                
+                # 归一化
+                input_proj = (input_proj - input_proj.min()) / (input_proj.max() - input_proj.min() + 1e-8)
+                recon_proj = (recon_proj - recon_proj.min()) / (recon_proj.max() - recon_proj.min() + 1e-8)
+                
+                # 水平堆叠: 输入 | 重建
+                combined = np.hstack([input_proj, recon_proj])  # (H, 2*W)
+                
+                # 添加到TensorBoard
+                writer.add_image(
+                    f"patch_reconstruction/sample_{i}",
+                    combined,
+                    epoch,
+                    dataformats='HW'
+                )
+                
+                # 误差图
+                error = np.abs(input_proj - recon_proj)
+                writer.add_image(
+                    f"patch_reconstruction/sample_{i}_error",
+                    error,
+                    epoch,
+                    dataformats='HW'
+                )
         
-        logger.info(f"已保存 {min(num_samples, images_np.shape[0])} 个patch重建可视化结果")
+        logger.info(f"已保存 {min(num_samples, clean_images.shape[0])} 个patch重建可视化结果")
         
         # ============ 第二部分：完整图像滑动窗口推理 ============
         if use_sliding_window:
@@ -409,7 +592,7 @@ def visualize_reconstruction(
                 
                 # 推断ROI大小（使用训练patch大小）
                 if roi_size is None:
-                    roi_size = images.shape[2:]  # (H, W, D)
+                    roi_size = clean_images.shape[2:]  # (H, W, D)
                     logger.info(f"使用训练patch大小作为滑动窗口ROI: {roi_size}")
                 
                 # 创建滑动窗口推理器
@@ -554,6 +737,8 @@ def train_autoencoder(config_path: str):
     # 获取downsample_factors（如果配置中存在）
     downsample_factors = ae_config.get('downsample_factors', None)
     initial_downsample_factor = ae_config.get('initial_downsample_factor', 1)
+    use_conv_downsample = ae_config.get('use_conv_downsample', True)
+    use_convtranspose = ae_config.get('use_convtranspose', False)
     
     if downsample_factors is not None:
         downsample_factors = tuple(downsample_factors)
@@ -567,6 +752,12 @@ def train_autoencoder(config_path: str):
         total_downsample = initial_downsample_factor * (2 ** (len(ae_config['num_channels']) - 1))
         logger.info(f"使用默认下采样配置: initial={initial_downsample_factor}, 总下采样倍数: {total_downsample}x")
     
+    # 记录采样方法
+    downsample_method = "卷积下采样" if use_conv_downsample else "平均池化下采样"
+    upsample_method = "转置卷积上采样" if use_convtranspose else "最近邻插值+卷积上采样"
+    logger.info(f"下采样方法: {downsample_method}")
+    logger.info(f"上采样方法: {upsample_method}")
+    
     autoencoder = AutoencoderKL(
         spatial_dims=ae_config['spatial_dims'],
         in_channels=ae_config['in_channels'],
@@ -577,7 +768,9 @@ def train_autoencoder(config_path: str):
         norm_num_groups=ae_config.get('norm_num_groups', 16),
         attention_levels=tuple(ae_config['attention_levels']),
         downsample_factors=downsample_factors,
-        initial_downsample_factor=initial_downsample_factor
+        initial_downsample_factor=initial_downsample_factor,
+        use_conv_downsample=use_conv_downsample,
+        use_convtranspose=use_convtranspose
     )
     
     # 启用梯度检查点以节省显存
@@ -668,6 +861,24 @@ def train_autoencoder(config_path: str):
     sw_roi_size = log_config.get('sliding_window_roi_size', None)  # None表示自动推断
     sw_batch_size = log_config.get('sliding_window_batch_size', 4)  # 滑动窗口批次大小
     
+    # ==================== 去噪自编码器配置 ====================
+    denoising_config = train_config.get('denoising', {})
+    use_denoising = denoising_config.get('enabled', False)
+    noise_type = denoising_config.get('noise_type', 'gaussian')
+    noise_std = denoising_config.get('noise_std', 0.1)
+    dropout_prob = denoising_config.get('dropout_prob', 0.1)
+    
+    if use_denoising:
+        logger.info("=" * 60)
+        logger.info("🔥 启用去噪自编码器模式 (Denoising Autoencoder)")
+        logger.info(f"  噪声类型: {noise_type}")
+        logger.info(f"  高斯噪声标准差: {noise_std}")
+        logger.info(f"  Dropout概率: {dropout_prob}")
+        logger.info("  模型将学习从噪声中恢复干净图像，迫使其学习数据的深层特征！")
+        logger.info("=" * 60)
+    else:
+        logger.info("使用标准自编码器模式")
+    
     # 快速开发模式
     fast_dev_run = train_config.get('fast_dev_run', False)
     fast_dev_run_batches = train_config.get('fast_dev_run_batches', 2)
@@ -712,7 +923,26 @@ def train_autoencoder(config_path: str):
             if fast_dev_run and step >= fast_dev_run_batches:
                 break
             
-            images = batch["image"].to(device)
+            # 原始干净图像
+            clean_images = batch["image"].to(device)
+            
+            # ============ 去噪自编码器：添加噪声 ============
+            if use_denoising:
+                # 给输入添加噪声
+                noisy_images = add_noise(
+                    clean_images,
+                    noise_type=noise_type,
+                    noise_std=noise_std,
+                    dropout_prob=dropout_prob
+                )
+                # 模型输入：带噪声的图像
+                input_images = noisy_images
+                # 目标输出：原始干净的图像
+                target_images = clean_images
+            else:
+                # 标准自编码器：输入=输出
+                input_images = clean_images
+                target_images = clean_images
             
             # ============ Generator部分 ============
             # 梯度清零（在累积开始时）
@@ -721,14 +951,15 @@ def train_autoencoder(config_path: str):
             
             # 混合精度前向传播
             with autocast(enabled=use_amp):
-                reconstruction, z_mu, z_sigma = autoencoder(images)
+                reconstruction, z_mu, z_sigma = autoencoder(input_images)
                 kl = KL_loss(z_mu, z_sigma)
                 
-                recons_loss = l1_loss(reconstruction.float(), images.float())
+                # 重建损失：对比重建结果和干净目标
+                recons_loss = l1_loss(reconstruction.float(), target_images.float())
                 
                 # 感知损失（如果启用）
                 if use_perceptual_loss:
-                    p_loss = loss_perceptual(reconstruction.float(), images.float())
+                    p_loss = loss_perceptual(reconstruction.float(), target_images.float())
                     loss_g = recons_loss + kl_weight * kl + perceptual_weight * p_loss
                 else:
                     loss_g = recons_loss + kl_weight * kl
@@ -769,7 +1000,8 @@ def train_autoencoder(config_path: str):
                     logits_fake = discriminator(reconstruction.contiguous().detach())[-1]
                     loss_d_fake = adv_loss(logits_fake, target_is_real=False, for_discriminator=True)
                     
-                    logits_real = discriminator(images.contiguous().detach())[-1]
+                    # 判别器判断的是目标（干净）图像的真假
+                    logits_real = discriminator(target_images.contiguous().detach())[-1]
                     loss_d_real = adv_loss(logits_real, target_is_real=True, for_discriminator=True)
                     
                     discriminator_loss = (loss_d_fake + loss_d_real) * 0.5
@@ -830,7 +1062,12 @@ def train_autoencoder(config_path: str):
         # 验证
         if (epoch + 1) % val_interval == 0 or epoch == n_epochs - 1:
             val_loss, val_recon, val_kl = validate(
-                autoencoder, val_loader, device, kl_weight, fast_dev_run, fast_dev_run_batches
+                autoencoder, val_loader, device, kl_weight, fast_dev_run, fast_dev_run_batches,
+                # 去噪参数
+                use_denoising=use_denoising,
+                noise_type=noise_type,
+                noise_std=noise_std,
+                dropout_prob=dropout_prob
             )
             
             writer.add_scalar("val/epoch/total_loss", val_loss, epoch)
@@ -860,7 +1097,12 @@ def train_autoencoder(config_path: str):
                 num_samples=num_visualize_samples,
                 use_sliding_window=use_sliding_window_vis,
                 roi_size=sw_roi_size,
-                sw_batch_size=sw_batch_size
+                sw_batch_size=sw_batch_size,
+                # 去噪参数
+                use_denoising=use_denoising,
+                noise_type=noise_type,
+                noise_std=noise_std,
+                dropout_prob=dropout_prob
             )
         
         # 保存checkpoint

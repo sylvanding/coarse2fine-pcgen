@@ -18,8 +18,56 @@ from torch.utils.data import DataLoader
 from monai import transforms
 from monai.data import Dataset, CacheDataset
 from monai.utils import set_determinism
+from monai.config import KeysCollection
+from monai.transforms import MapTransform
 
 logger = logging.getLogger(__name__)
+
+
+class InvertIntensityd(MapTransform):
+    """
+    亮度反转变换
+    
+    将图像中最小的亮度值变成最大的，最大的亮度值变成最小的。
+    公式: output = max_value - input + min_value
+    
+    注意: 此变换应该在归一化之后应用，此时图像值在[0, 1]或[-1, 1]范围内。
+    """
+    
+    def __init__(self, keys: KeysCollection, allow_missing_keys: bool = False):
+        """
+        初始化亮度反转变换
+        
+        Args:
+            keys: 要处理的数据字典键
+            allow_missing_keys: 是否允许缺失键
+        """
+        super().__init__(keys, allow_missing_keys)
+    
+    def __call__(self, data):
+        """
+        应用亮度反转
+        
+        Args:
+            data: 输入数据字典
+            
+        Returns:
+            转换后的数据字典
+        """
+        d = dict(data)
+        
+        for key in self.key_iterator(d):
+            img = d[key]
+            
+            # 获取当前图像的最小值和最大值
+            min_val = torch.min(img)
+            max_val = torch.max(img)
+            
+            # 反转: output = max - input + min
+            # 这样原来的min会变成max，原来的max会变成min
+            d[key] = max_val - img + min_val
+        
+        return d
 
 
 class VoxelNiftiDataset:
@@ -292,6 +340,13 @@ class VoxelNiftiDataset:
                 )
             )
         
+        # ⭐ 亮度反转（在归一化之后应用）
+        if self.augmentation_config.get('invert_intensity', False):
+            logger.info("  启用亮度反转增强")
+            transform_list.append(
+                InvertIntensityd(keys=["image"])
+            )
+        
         # 确保类型为float32
         transform_list.append(
             transforms.EnsureTyped(keys=["image"], dtype=torch.float32)
@@ -393,6 +448,7 @@ def create_train_val_dataloaders(
         cache_rate=cache_rate,
         cache_num_workers=num_workers,
         augmentation=False,
+        augmentation_config=augmentation_config,
         max_data_size=max_data_size_val
     )
     

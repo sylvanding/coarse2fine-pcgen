@@ -97,32 +97,49 @@ class Upsample(nn.Module):
 
 class Downsample(nn.Module):
     """
-    Convolution-based downsampling layer.
+    Downsampling layer using either convolution or average pooling.
 
     Args:
         spatial_dims: number of spatial dimensions (1D, 2D, 3D).
         in_channels: number of input channels.
         stride: downsampling factor (default: 2).
+        use_conv: if True, use strided convolution; if False, use average pooling (default: True).
     """
 
-    def __init__(self, spatial_dims: int, in_channels: int, stride: int = 2) -> None:
+    def __init__(self, spatial_dims: int, in_channels: int, stride: int = 2, use_conv: bool = True) -> None:
         super().__init__()
         self.stride = stride
-        self.pad = (0, 1) * spatial_dims
-
-        self.conv = Convolution(
-            spatial_dims=spatial_dims,
-            in_channels=in_channels,
-            out_channels=in_channels,
-            strides=stride,
-            kernel_size=3,
-            padding=0,
-            conv_only=True,
-        )
+        self.use_conv = use_conv
+        
+        if use_conv:
+            # 原来的卷积实现
+            self.pad = (0, 1) * spatial_dims
+            self.conv = Convolution(
+                spatial_dims=spatial_dims,
+                in_channels=in_channels,
+                out_channels=in_channels,
+                strides=stride,
+                kernel_size=3,
+                padding=0,
+                conv_only=True,
+            )
+        else:
+            # Mean Pooling 实现
+            if spatial_dims == 1:
+                self.pool = nn.AvgPool1d(kernel_size=stride, stride=stride)
+            elif spatial_dims == 2:
+                self.pool = nn.AvgPool2d(kernel_size=stride, stride=stride)
+            elif spatial_dims == 3:
+                self.pool = nn.AvgPool3d(kernel_size=stride, stride=stride)
+            else:
+                raise ValueError(f"spatial_dims must be 1, 2, or 3, got {spatial_dims}")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = nn.functional.pad(x, self.pad, mode="constant", value=0.0)
-        x = self.conv(x)
+        if self.use_conv:
+            x = nn.functional.pad(x, self.pad, mode="constant", value=0.0)
+            x = self.conv(x)
+        else:
+            x = self.pool(x)
         return x
 
 
@@ -333,6 +350,7 @@ class Encoder(nn.Module):
         use_flash_attention: if True, use flash attention for a memory efficient attention mechanism.
         downsample_factors: sequence of downsampling factors for each level. If None, defaults to 2 for all levels.
         initial_downsample_factor: downsampling factor for the initial convolution. Default is 1 (no downsampling).
+        use_conv_downsample: if True, use strided convolution for downsampling; if False, use average pooling (default: True).
     """
 
     def __init__(
@@ -349,6 +367,7 @@ class Encoder(nn.Module):
         use_flash_attention: bool = False,
         downsample_factors: Sequence[int] | None = None,
         initial_downsample_factor: int = 1,
+        use_conv_downsample: bool = True,
     ) -> None:
         super().__init__()
         self.spatial_dims = spatial_dims
@@ -360,6 +379,7 @@ class Encoder(nn.Module):
         self.norm_eps = norm_eps
         self.attention_levels = attention_levels
         self.initial_downsample_factor = initial_downsample_factor
+        self.use_conv_downsample = use_conv_downsample
         
         # 默认每层下采样2倍（向后兼容）
         if downsample_factors is None:
@@ -412,7 +432,7 @@ class Encoder(nn.Module):
 
             if not is_final_block:
                 stride = self.downsample_factors[i]
-                blocks.append(Downsample(spatial_dims=spatial_dims, in_channels=input_channel, stride=stride))
+                blocks.append(Downsample(spatial_dims=spatial_dims, in_channels=input_channel, stride=stride, use_conv=self.use_conv_downsample))
 
         # Non-local attention block
         if with_nonlocal_attn is True:
@@ -660,6 +680,8 @@ class AutoencoderKL(nn.Module):
             This allows for faster downsampling at the very beginning to save memory.
             Total downsampling = initial_downsample_factor × prod(downsample_factors).
             Example: initial_downsample_factor=2 with downsample_factors=[4, 2] gives 2×4×2=16x total downsampling.
+        use_conv_downsample: if True, use strided convolution for downsampling; if False, use average pooling (default: True).
+            Average pooling can reduce parameters and computation while maintaining smooth downsampling.
     """
 
     def __init__(
@@ -680,6 +702,7 @@ class AutoencoderKL(nn.Module):
         use_convtranspose: bool = False,
         downsample_factors: Sequence[int] | None = None,
         initial_downsample_factor: int = 1,
+        use_conv_downsample: bool = True,
     ) -> None:
         super().__init__()
 
@@ -717,6 +740,7 @@ class AutoencoderKL(nn.Module):
             use_flash_attention=use_flash_attention,
             downsample_factors=downsample_factors,
             initial_downsample_factor=initial_downsample_factor,
+            use_conv_downsample=use_conv_downsample,
         )
         self.decoder = Decoder(
             spatial_dims=spatial_dims,
