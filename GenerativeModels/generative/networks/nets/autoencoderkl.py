@@ -650,7 +650,7 @@ class Decoder(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         for block in self.blocks:
             x = block(x)
-        return x
+        return F.sigmoid(x)
 
 
 class AutoencoderKL(nn.Module):

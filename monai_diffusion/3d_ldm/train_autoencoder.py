@@ -43,6 +43,182 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# ==================== 损失函数定义 ====================
+
+class DiceLoss(torch.nn.Module):
+    """
+    Dice Loss用于处理不平衡数据
+    
+    特别适用于前景（微管）像素较少的情况。
+    Dice Loss关注的是前景区域的重叠度，对前景像素更敏感。
+    """
+    def __init__(self, smooth: float = 1e-5, sigmoid: bool = False):
+        """
+        Args:
+            smooth: 平滑项，避免除零
+            sigmoid: 是否对输入应用sigmoid（如果模型输出未归一化）
+        """
+        super().__init__()
+        self.smooth = smooth
+        self.sigmoid = sigmoid
+    
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """
+        计算Dice Loss
+        
+        Args:
+            pred: 预测张量 (B, C, H, W, D)
+            target: 目标张量 (B, C, H, W, D)
+            
+        Returns:
+            Dice Loss值 (标量)
+        """
+        if self.sigmoid:
+            pred = torch.sigmoid(pred)
+        
+        # 展平为 (B, N)
+        pred_flat = pred.view(pred.size(0), -1)
+        target_flat = target.view(target.size(0), -1)
+        
+        # 计算交集和并集
+        intersection = (pred_flat * target_flat).sum(dim=1)
+        union = pred_flat.sum(dim=1) + target_flat.sum(dim=1)
+        
+        # Dice系数
+        dice = (2.0 * intersection + self.smooth) / (union + self.smooth)
+        
+        # Dice Loss = 1 - Dice系数
+        return 1.0 - dice.mean()
+
+
+class WeightedReconstructionLoss(torch.nn.Module):
+    """
+    加权重建损失（L1或MSE）
+    
+    对前景像素（微管）给予更高的权重，对背景像素给予更低的权重。
+    这样可以迫使模型关注前景，避免预测全黑。
+    """
+    def __init__(
+        self,
+        loss_type: str = "l1",  # "l1" or "mse"
+        foreground_weight: float = 10.0,
+        background_weight: float = 1.0,
+        threshold: float = 0.1,  # 用于区分前景和背景的阈值
+    ):
+        """
+        Args:
+            loss_type: 损失类型，"l1" 或 "mse"
+            foreground_weight: 前景像素权重（应该 >> 1）
+            background_weight: 背景像素权重（通常为1.0）
+            threshold: 像素值阈值，高于此值认为是前景
+        """
+        super().__init__()
+        self.loss_type = loss_type
+        self.foreground_weight = foreground_weight
+        self.background_weight = background_weight
+        self.threshold = threshold
+        
+        logger.info(f"初始化加权重建损失:")
+        logger.info(f"  损失类型: {loss_type}")
+        logger.info(f"  前景权重: {foreground_weight}x")
+        logger.info(f"  背景权重: {background_weight}x")
+        logger.info(f"  前景阈值: {threshold}")
+    
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """
+        计算加权重建损失
+        
+        Args:
+            pred: 预测张量 (B, C, H, W, D)
+            target: 目标张量 (B, C, H, W, D)
+            
+        Returns:
+            加权损失值（标量）
+        """
+        # 计算逐像素误差
+        if self.loss_type == "l1":
+            pixel_loss = torch.abs(pred - target)
+        elif self.loss_type == "mse":
+            pixel_loss = (pred - target) ** 2
+        else:
+            raise ValueError(f"不支持的损失类型: {self.loss_type}")
+        
+        # 创建权重mask：根据目标图像区分前景和背景
+        # 注意：这里使用目标图像判断前景/背景
+        foreground_mask = (target > self.threshold).float()
+        background_mask = 1.0 - foreground_mask
+        
+        # 应用权重
+        weighted_loss = (
+            pixel_loss * foreground_mask * self.foreground_weight +
+            pixel_loss * background_mask * self.background_weight
+        )
+        
+        # 返回平均损失
+        return weighted_loss.mean()
+
+
+class CombinedReconstructionLoss(torch.nn.Module):
+    """
+    组合损失：Dice Loss + 加权重建损失
+    
+    结合两种损失的优势：
+    - Dice Loss: 关注前景区域的整体重叠度
+    - 加权重建损失: 对前景像素给予更高的逐像素重建权重
+    """
+    def __init__(
+        self,
+        dice_weight: float = 1.0,
+        recon_weight: float = 1.0,
+        recon_loss_type: str = "l1",
+        foreground_weight: float = 10.0,
+        background_weight: float = 1.0,
+        threshold: float = 0.1,
+        dice_smooth: float = 1e-5,
+    ):
+        """
+        Args:
+            dice_weight: Dice Loss的权重
+            recon_weight: 重建损失的权重
+            recon_loss_type: 重建损失类型 "l1" 或 "mse"
+            foreground_weight: 前景像素权重
+            background_weight: 背景像素权重
+            threshold: 前景阈值
+            dice_smooth: Dice平滑项
+        """
+        super().__init__()
+        self.dice_weight = dice_weight
+        self.recon_weight = recon_weight
+        
+        self.dice_loss = DiceLoss(smooth=dice_smooth, sigmoid=False)
+        self.weighted_recon_loss = WeightedReconstructionLoss(
+            loss_type=recon_loss_type,
+            foreground_weight=foreground_weight,
+            background_weight=background_weight,
+            threshold=threshold
+        )
+        
+        logger.info(f"初始化组合重建损失:")
+        logger.info(f"  Dice Loss权重: {dice_weight}")
+        logger.info(f"  重建损失权重: {recon_weight}")
+    
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """
+        计算组合损失
+        
+        Args:
+            pred: 预测张量 (B, C, H, W, D)
+            target: 目标张量 (B, C, H, W, D)
+            
+        Returns:
+            组合损失值（标量）
+        """
+        dice = self.dice_loss(pred, target)
+        recon = self.weighted_recon_loss(pred, target)
+        
+        return self.dice_weight * dice + self.recon_weight * recon
+
+
 # ==================== 去噪自编码器：噪声生成函数 ====================
 
 def add_gaussian_noise(images: torch.Tensor, noise_std: float = 0.1) -> torch.Tensor:
@@ -243,6 +419,7 @@ def validate(
     kl_weight: float,
     fast_dev_run: bool,
     fast_dev_run_batches: int,
+    recon_loss_fn: torch.nn.Module,  # 重建损失函数
     # 去噪参数
     use_denoising: bool = False,
     noise_type: str = "gaussian",
@@ -285,11 +462,11 @@ def validate(
                 # 模型输入：带噪声的图像
                 # 目标输出：原始干净的图像
                 reconstruction, z_mu, z_sigma = autoencoder(noisy_images)
-                recons_loss = F.l1_loss(reconstruction.float(), clean_images.float())
+                recons_loss = recon_loss_fn(reconstruction.float(), clean_images.float())
             else:
                 # 标准自编码器：输入=输出
                 reconstruction, z_mu, z_sigma = autoencoder(clean_images)
-                recons_loss = F.l1_loss(reconstruction.float(), clean_images.float())
+                recons_loss = recon_loss_fn(reconstruction.float(), clean_images.float())
             
             kl = KL_loss(z_mu, z_sigma)
             loss = recons_loss + kl_weight * kl
@@ -794,8 +971,61 @@ def train_autoencoder(config_path: str):
     discriminator.to(device)
     logger.info("创建PatchDiscriminator")
     
-    # 定义损失函数
-    l1_loss = L1Loss()
+    # ==================== 定义重建损失函数 ====================
+    loss_config = train_config.get('loss', {})
+    recon_loss_type = loss_config.get('reconstruction_loss_type', 'l1')  # 'l1', 'weighted', 'dice', 'combined'
+    
+    logger.info("=" * 60)
+    logger.info(f"配置重建损失函数: {recon_loss_type}")
+    
+    if recon_loss_type == 'l1':
+        # 标准L1损失
+        recon_loss_fn = L1Loss()
+        logger.info("使用标准L1Loss")
+    
+    elif recon_loss_type == 'mse':
+        # 标准MSE损失
+        recon_loss_fn = MSELoss()
+        logger.info("使用标准MSELoss")
+    
+    elif recon_loss_type == 'weighted':
+        # 加权重建损失
+        weighted_config = loss_config.get('weighted', {})
+        recon_loss_fn = WeightedReconstructionLoss(
+            loss_type=weighted_config.get('loss_type', 'l1'),
+            foreground_weight=weighted_config.get('foreground_weight', 10.0),
+            background_weight=weighted_config.get('background_weight', 1.0),
+            threshold=weighted_config.get('threshold', 0.1)
+        )
+    
+    elif recon_loss_type == 'dice':
+        # 纯Dice损失
+        dice_config = loss_config.get('dice', {})
+        recon_loss_fn = DiceLoss(
+            smooth=dice_config.get('smooth', 1e-5),
+            sigmoid=dice_config.get('sigmoid', False)
+        )
+        logger.info(f"使用Dice Loss (smooth={dice_config.get('smooth', 1e-5)})")
+    
+    elif recon_loss_type == 'combined':
+        # 组合损失：Dice + 加权重建
+        combined_config = loss_config.get('combined', {})
+        recon_loss_fn = CombinedReconstructionLoss(
+            dice_weight=combined_config.get('dice_weight', 1.0),
+            recon_weight=combined_config.get('recon_weight', 1.0),
+            recon_loss_type=combined_config.get('recon_loss_type', 'l1'),
+            foreground_weight=combined_config.get('foreground_weight', 10.0),
+            background_weight=combined_config.get('background_weight', 1.0),
+            threshold=combined_config.get('threshold', 0.1),
+            dice_smooth=combined_config.get('dice_smooth', 1e-5)
+        )
+    
+    else:
+        raise ValueError(f"不支持的重建损失类型: {recon_loss_type}")
+    
+    logger.info("=" * 60)
+    
+    # 对抗损失
     adv_loss = PatchAdversarialLoss(criterion="least_squares")
     
     # 判断是否使用感知损失（大分辨率时可以禁用以节省显存）
@@ -955,7 +1185,7 @@ def train_autoencoder(config_path: str):
                 kl = KL_loss(z_mu, z_sigma)
                 
                 # 重建损失：对比重建结果和干净目标
-                recons_loss = l1_loss(reconstruction.float(), target_images.float())
+                recons_loss = recon_loss_fn(reconstruction.float(), target_images.float())
                 
                 # 感知损失（如果启用）
                 if use_perceptual_loss:
@@ -1063,6 +1293,7 @@ def train_autoencoder(config_path: str):
         if (epoch + 1) % val_interval == 0 or epoch == n_epochs - 1:
             val_loss, val_recon, val_kl = validate(
                 autoencoder, val_loader, device, kl_weight, fast_dev_run, fast_dev_run_batches,
+                recon_loss_fn=recon_loss_fn,  # 传入重建损失函数
                 # 去噪参数
                 use_denoising=use_denoising,
                 noise_type=noise_type,
