@@ -15,9 +15,15 @@ cd coarse2fine-pcgen/monai_diffusion
 
 #### ShareGPU
 
+3090-24G, pytorch221, cuda121, Python311
+
 ```bash
 cd /hy-tmp
 git clone --depth 1 -b master https://kkgithub.com/sylvanding/coarse2fine-pcgen
+
+pip install 'setuptools<69'
+
+pip install -r monai_diffusion/requirements_gpushare.txt
 
 python monai_diffusion/3d_ldm/train_autoencoder.py
 
