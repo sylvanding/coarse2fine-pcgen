@@ -190,8 +190,8 @@ autoencoder:
 diffusion:
   # UNet架构
   spatial_dims: 3
-  in_channels: 3  # 必须匹配autoencoder的latent_channels
-  out_channels: 3
+  in_channels: 16  # 必须匹配autoencoder的latent_channels
+  out_channels: 16
   num_channels: [32, 64, 64]
   attention_levels: [false, true, true]
   num_head_channels: [0, 64, 64]
@@ -207,33 +207,33 @@ diffusion:
   # 训练配置
   training:
     n_epochs: 500
-    batch_size: 2
+    batch_size: 4
     learning_rate: 1.0e-4
     
     # 验证和保存
-    val_interval: 10
-    save_interval: 50
+    val_interval: 5
+    save_interval: 10
     
     # 样本生成
-    generate_samples_interval: 10  # 每N个epoch生成样本用于监控
+    generate_samples_interval: 5  # 每N个epoch生成样本用于监控
     num_samples_to_generate: 4  # 生成的样本数量
     
     # 快速开发模式
-    fast_dev_run: true
-    fast_dev_run_batches: 2
+    fast_dev_run: false
+    fast_dev_run_batches: 1
   
   # Checkpoint路径
   checkpoints:
-    autoencoder_path: "outputs/ckpt/autoencoder/best_model.pt"  # 预训练的autoencoder
+    autoencoder_path: "/repos/ckpts/monai-diffusion/autoencoder-16channels/latest_checkpoint.pt"  # 预训练的autoencoder
     output_dir: "outputs/ckpt/diffusion"
-    save_best: true
+    save_best: false
     resume_from: null
   
   # 日志配置
   logging:
     log_dir: "outputs/logs/diffusion"
-    log_interval: 20
-    visualize_interval: 10  # 每N个epoch可视化一次生成样本与真实样本的对比
+    log_interval: 10
+    visualize_interval: 2  # 每N个epoch可视化一次生成样本与真实样本的对比
     num_visualize_samples: 4  # 可视化的样本数量
 
 # 采样配置

@@ -366,7 +366,8 @@ class VoxelNiftiDataset:
 def create_train_val_dataloaders(
     config: Dict[str, Any],
     train_data_dir: Optional[str] = None,
-    val_data_dir: Optional[str] = None
+    val_data_dir: Optional[str] = None,
+    batch_size: Optional[int] = None,
 ):
     """
     创建训练和验证DataLoader
@@ -375,6 +376,7 @@ def create_train_val_dataloaders(
         config: 配置字典
         train_data_dir: 训练数据目录（覆盖config）
         val_data_dir: 验证数据目录（覆盖config）
+        batch_size: 批量大小（覆盖config）
         
     Returns:
         Tuple[DataLoader, DataLoader]: (train_loader, val_loader)
@@ -414,12 +416,13 @@ def create_train_val_dataloaders(
     augmentation_enabled = augmentation_config.get('enabled', False)
     
     # 获取batch_size（从autoencoder或diffusion配置中）
-    if 'autoencoder' in config and 'training' in config['autoencoder']:
-        batch_size = config['autoencoder']['training']['batch_size']
-    elif 'diffusion' in config and 'training' in config['diffusion']:
-        batch_size = config['diffusion']['training']['batch_size']
-    else:
-        batch_size = 2  # 默认值
+    if batch_size is None:
+        if 'autoencoder' in config and 'training' in config['autoencoder']:
+            batch_size = config['autoencoder']['training']['batch_size']
+        elif 'diffusion' in config and 'training' in config['diffusion']:
+            batch_size = config['diffusion']['training']['batch_size']
+        else:
+            batch_size = 2  # 默认值
     
     logger.info("创建训练和验证数据集...")
     

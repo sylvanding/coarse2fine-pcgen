@@ -262,7 +262,7 @@ def visualize_samples(
         
         # 生成合成样本
         noise = torch.randn((num_samples, *latent_shape)).to(device)
-        scheduler.set_timesteps(num_inference_steps=50)  # 使用较少的步数加快可视化
+        scheduler.set_timesteps(num_inference_steps=200)  # 使用较少的步数加快可视化
         
         synthetic_images = inferer.sample(
             input_noise=noise,
@@ -346,11 +346,11 @@ def train_diffusion(config_path: str):
     logger.info(f"混合精度训练: {mixed_precision}")
     
     # 创建数据加载器
-    train_loader, val_loader = create_train_val_dataloaders(config)
+    train_config = diff_config['training']
+    train_loader, val_loader = create_train_val_dataloaders(config, batch_size=train_config.get('batch_size', None))
     
     # 提取其他配置参数
     ae_config = config['autoencoder']
-    train_config = diff_config['training']
     scheduler_config = diff_config['scheduler']
     
     # 加载预训练的AutoencoderKL
@@ -418,7 +418,7 @@ def train_diffusion(config_path: str):
     
     if fast_dev_run:
         logger.info(f"**快速开发模式**: 每个epoch只运行 {fast_dev_run_batches} 个batch")
-        n_epochs = 5  # 快速模式只运行2个epoch
+        n_epochs = 2  # 快速模式只运行2个epoch
         val_interval = 1
         save_interval = 1
         log_interval = 1
