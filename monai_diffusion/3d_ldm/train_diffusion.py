@@ -12,6 +12,7 @@ import logging
 from tqdm import tqdm
 import yaml
 import shutil
+import importlib.util
 
 # 添加GenerativeModels到Python路径
 project_root = Path(__file__).parent.parent.parent
@@ -30,6 +31,13 @@ from generative.networks.nets import AutoencoderKL, DiffusionModelUNet
 from generative.networks.schedulers import DDPMScheduler
 
 from monai_diffusion.datasets import create_train_val_dataloaders
+
+# 从同目录的train_autoencoder导入add_noise函数
+train_ae_path = Path(__file__).parent / "train_autoencoder.py"
+spec = importlib.util.spec_from_file_location("train_autoencoder", train_ae_path)
+train_ae_module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(train_ae_module)
+add_noise = train_ae_module.add_noise
 
 # 配置日志
 logging.basicConfig(
@@ -153,15 +161,38 @@ def validate(
     autoencoder: torch.nn.Module,
     inferer: LatentDiffusionInferer,
     val_loader,
-    device: torch.device
+    device: torch.device,
+    use_input_noise: bool = False,
+    noise_type: str = "gaussian",
+    noise_std: float = 0.1,
+    dropout_prob: float = 0.1
 ):
-    """验证函数"""
+    """
+    验证函数
+    
+    Args:
+        use_input_noise: 是否在输入图像上添加噪声
+        noise_type: 噪声类型 ("gaussian", "dropout", "mixed")
+        noise_std: 高斯噪声标准差
+        dropout_prob: dropout概率
+    """
     unet.eval()
     val_loss = 0
     
     with torch.no_grad():
         for batch in val_loader:
-            images = batch["image"].to(device)
+            clean_images = batch["image"].to(device)
+            
+            # 如果启用输入噪声，给图像添加噪声
+            if use_input_noise:
+                images = add_noise(
+                    clean_images,
+                    noise_type=noise_type,
+                    noise_std=noise_std,
+                    dropout_prob=dropout_prob
+                )
+            else:
+                images = clean_images
             
             with autocast(enabled=True):
                 # 编码到潜在空间
@@ -262,7 +293,7 @@ def visualize_samples(
         
         # 生成合成样本
         noise = torch.randn((num_samples, *latent_shape)).to(device)
-        scheduler.set_timesteps(num_inference_steps=200)  # 使用较少的步数加快可视化
+        scheduler.set_timesteps(num_inference_steps=1000)  # 使用较少的步数加快可视化
         
         synthetic_images = inferer.sample(
             input_noise=noise,
@@ -412,6 +443,24 @@ def train_diffusion(config_path: str):
     visualize_interval = log_config.get('visualize_interval', 10)  # 默认每10个epoch可视化一次
     num_visualize_samples = log_config.get('num_visualize_samples', 4)  # 默认可视化4个样本
     
+    # ==================== 输入噪声增强配置 ====================
+    input_noise_config = train_config.get('input_noise', {})
+    use_input_noise = input_noise_config.get('enabled', False)
+    noise_type = input_noise_config.get('noise_type', 'gaussian')
+    noise_std = input_noise_config.get('noise_std', 0.1)
+    dropout_prob = input_noise_config.get('dropout_prob', 0.1)
+    
+    if use_input_noise:
+        logger.info("=" * 60)
+        logger.info("🔥 启用输入噪声增强 (Input Noise Augmentation)")
+        logger.info(f"  噪声类型: {noise_type}")
+        logger.info(f"  高斯噪声标准差: {noise_std}")
+        logger.info(f"  Dropout概率: {dropout_prob}")
+        logger.info("  Diffusion模型将从带噪声的输入中学习生成，提高鲁棒性！")
+        logger.info("=" * 60)
+    else:
+        logger.info("未启用输入噪声增强")
+    
     # 快速开发模式
     fast_dev_run = train_config.get('fast_dev_run', False)
     fast_dev_run_batches = train_config.get('fast_dev_run_batches', 2)
@@ -464,7 +513,19 @@ def train_diffusion(config_path: str):
             if fast_dev_run and step >= fast_dev_run_batches:
                 break
             
-            images = batch["image"].to(device)
+            clean_images = batch["image"].to(device)
+            
+            # ============ 输入噪声增强：添加噪声 ============
+            if use_input_noise:
+                images = add_noise(
+                    clean_images,
+                    noise_type=noise_type,
+                    noise_std=noise_std,
+                    dropout_prob=dropout_prob
+                )
+            else:
+                images = clean_images
+            
             optimizer.zero_grad(set_to_none=True)
             
             with autocast(enabled=mixed_precision):
@@ -516,7 +577,13 @@ def train_diffusion(config_path: str):
         
         # 验证
         if (epoch + 1) % val_interval == 0 or epoch == n_epochs - 1:
-            val_loss = validate(unet, autoencoder, inferer, val_loader, device)
+            val_loss = validate(
+                unet, autoencoder, inferer, val_loader, device,
+                use_input_noise=use_input_noise,
+                noise_type=noise_type,
+                noise_std=noise_std,
+                dropout_prob=dropout_prob
+            )
             writer.add_scalar("val/epoch/loss", val_loss, epoch)
             logger.info(f"Epoch {epoch} 验证损失: {val_loss:.4f}")
             

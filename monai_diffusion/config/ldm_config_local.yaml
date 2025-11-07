@@ -24,8 +24,8 @@ data:
   cache_rate: 0.2  # 缓存比例，0表示不缓存，1表示全部缓存
   num_workers: 4
   pin_memory: false
-  max_data_size_for_train: 200
-  max_data_size_for_val: 4
+  max_data_size_for_train: 4
+  max_data_size_for_val: 200
   
   # 数据增强
   augmentation:
@@ -46,7 +46,7 @@ autoencoder:
   # 对于高分辨率（如256x256x64），建议使用较小的通道数，如[16, 32, 64]
   # 对于低分辨率（如64x64x32），可以使用较大的通道数，如[32, 64, 64]
   num_channels: [32, 64, 128]
-  latent_channels: 16
+  latent_channels: 3
   num_res_blocks: 1
   norm_num_groups: 16
   # attention_levels: 注意力机制非常占显存，建议只在最后一层使用
@@ -126,7 +126,7 @@ autoencoder:
     # 损失权重
     adv_weight: 0.01
     perceptual_weight: 0.001
-    kl_weight: 5.0e-5
+    kl_weight: 1.0e-6
     
     # 显存优化选项
     use_perceptual_loss: true  # 对于高分辨率，可以设为false以节省显存
@@ -190,9 +190,9 @@ autoencoder:
 diffusion:
   # UNet架构
   spatial_dims: 3
-  in_channels: 16  # 必须匹配autoencoder的latent_channels
-  out_channels: 16
-  num_channels: [32, 64, 64]
+  in_channels: 3  # 必须匹配autoencoder的latent_channels
+  out_channels: 3
+  num_channels: [32, 64, 128]
   attention_levels: [false, true, true]
   num_head_channels: [0, 64, 64]
   num_res_blocks: 1
@@ -207,8 +207,22 @@ diffusion:
   # 训练配置
   training:
     n_epochs: 500
-    batch_size: 4
+    batch_size: 2
     learning_rate: 1.0e-4
+    
+    # ==================== 输入噪声增强配置 ====================
+    # 在Diffusion训练时给输入图像添加噪声，提高模型鲁棒性
+    # 让Diffusion模型学习从带噪声的输入中生成高质量样本
+    input_noise:
+      enabled: false  # 是否启用输入噪声增强
+      noise_type: "mixed"  # 噪声类型: "gaussian", "dropout", "mixed"
+      noise_std: 0.03  # 高斯噪声标准差（对于[-1, 1]归一化的图像）
+      dropout_prob: 0.1  # 体素丢弃概率
+      # 
+      # 参数调节建议（注意：Diffusion输入归一化到[-1, 1]范围）:
+      # - 轻度噪声: noise_std=0.05, dropout_prob=0.05 (推荐)
+      # - 中度噪声: noise_std=0.10, dropout_prob=0.10
+      # - 重度噪声: noise_std=0.15, dropout_prob=0.15
     
     # 验证和保存
     val_interval: 5
@@ -224,7 +238,7 @@ diffusion:
   
   # Checkpoint路径
   checkpoints:
-    autoencoder_path: "/repos/ckpts/monai-diffusion/autoencoder-16channels/latest_checkpoint.pt"  # 预训练的autoencoder
+    autoencoder_path: "/repos/ckpts/monai-diffusion/autoencoder-3channels/latest_checkpoint.pt"  # 预训练的autoencoder
     output_dir: "outputs/ckpt/diffusion"
     save_best: false
     resume_from: null
