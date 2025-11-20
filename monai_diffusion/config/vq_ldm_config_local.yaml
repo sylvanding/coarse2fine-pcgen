@@ -1,0 +1,264 @@
+# VQ-Latent Diffusion Model (VQ-LDM) 配置文件
+# 
+# 这个配置文件用于训练基于VQVAE的潜在扩散模型
+# 包含两个阶段：
+# 1. VQVAE训练（train_vqvae.py）
+# 2. 基于VQVAE潜在空间的Diffusion训练（train_diffusion.py）
+
+# ==================== 全局设置 ====================
+seed: 42
+
+device:
+  use_cuda: true
+  gpu_id: 0
+  mixed_precision: true
+
+# ==================== 数据配置 ====================
+data:
+  # 训练数据目录
+  train_data_dir: "/repos/datasets/batch_simulation_microtubule_20251017_2048_nifti/train"
+  # 验证数据目录
+  val_data_dir: "/repos/datasets/batch_simulation_microtubule_20251017_2048_nifti/val"
+  
+  # 体素大小（训练时的目标分辨率）
+  voxel_size: [96, 96, 48]  # 根据显存调整，建议64x64x64或更小
+  
+  # 可选：预先resize整个体素（在裁剪patch之前）
+  # 如果数据太大，可以先resize到合理大小
+  voxel_resize: [128, 128, 64]  # 例如: [256, 256, 256] 或 null 表示不resize
+  
+  # 数据加载设置
+  cache_rate: 1  # 缓存比例，0表示不缓存，1表示全部缓存
+  num_workers: 4
+  pin_memory: false
+  max_data_size_for_train: 4
+  max_data_size_for_val: 4
+  
+  # 数据增强
+  augmentation:
+    enabled: true
+    use_patch_based: false  # ⭐ 启用Patch-Based训练
+    use_center_crop_for_val: true  # 验证时使用中心裁剪
+    invert_intensity: false  # 是否对图片亮度进行反转（将最小亮度变成最大，最大亮度变成最小）
+    # random_flip_prob: 0.5
+    # random_rotate_prob: 0.5
+
+# ==================== VQVAE配置 ====================
+# 
+# ⚠️ 注意：VQVAE和Autoencoder的配置参数格式不同！
+# 
+# VQVAE (本文件):
+#   - 使用 downsample_parameters/upsample_parameters (详细参数)
+#   - 参数数量必须等于 num_channels 的长度
+#   - 格式: [[stride, kernel_size, padding, output_padding], ...]
+# 
+# Autoencoder (ldm_config_local.yaml):
+#   - 使用 downsample_factors (简化参数)
+#   - 使用 initial_downsample_factor (初始下采样)
+#   - 这是不同的网络实现！
+#
+vqvae:
+  # 模型参数
+  spatial_dims: 3
+  in_channels: 1
+  out_channels: 1
+  
+  # 编码器/解码器通道数（逐层递增/递减）
+  num_channels: [64, 128, 256]  # 3层编码器/解码器
+  
+  # 残差块通道数
+  num_res_channels: 256
+  
+  # 每个分辨率级别的残差块数量
+  num_res_layers: 2
+  
+  # Codebook参数
+  num_embeddings: 256  # Codebook大小（离散编码的数量）
+  embedding_dim: 32     # 每个编码的维度
+  
+  # 采样参数（可选，如果不指定则使用默认的2倍下采样）
+  # 格式: [[stride, kernel_size, padding, output_padding], ...]
+  # ⚠️ VQVAE要求downsample_parameters的长度必须等于num_channels的长度
+  downsample_parameters:
+    - [2, 4, 1, 1]  # 第1层下采样 (64 -> 128)
+    - [2, 4, 1, 1]  # 第2层下采样 (128 -> 256)
+    - [2, 4, 1, 1]  # 第3层下采样 (256通道层)
+  
+  upsample_parameters:
+    - [2, 4, 1, 1, 0]  # 第1层上采样 (64通道层)
+    - [2, 4, 1, 1, 0]  # 第2层上采样 (128 -> 64)
+    - [2, 4, 1, 1, 0]  # 第3层上采样 (256 -> 128)
+  
+  # 训练配置
+  training:
+    n_epochs: 100
+    batch_size: 2  # 根据显存调整
+    learning_rate: 1.0e-4
+    val_interval: 10
+    save_interval: 10
+    
+    # 快速开发模式（用于测试，只运行几个batch）
+    fast_dev_run: false
+    fast_dev_run_batches: 2
+    
+    # 损失函数配置
+    loss:
+      # 重建损失类型
+      # 选项: "l1", "mse", "weighted", "dice", "combined"
+      reconstruction_loss_type: "combined"  # 默认使用L1损失
+      
+      # 加权重建损失配置（reconstruction_loss_type="weighted"时生效）
+      weighted:
+        recon_loss_type: "l1"   # 基础损失类型 "l1" 或 "mse"
+        foreground_weight: 10.0  # 前景像素权重
+        background_weight: 1.0   # 背景像素权重
+        threshold: 0.1           # 前景阈值
+      
+      # Dice Loss配置（reconstruction_loss_type="dice"时生效）
+      dice:
+        smooth: 1.0e-5  # 平滑项，避免除零
+        sigmoid: false  # 是否对输入应用sigmoid
+      
+      # 组合损失配置（reconstruction_loss_type="combined"时生效）
+      combined:
+        dice_weight: 0.5        # Dice Loss权重
+        recon_weight: 1.0       # 重建损失权重
+        recon_loss_type: "l1"   # 重建损失类型 "l1" 或 "mse"
+        foreground_weight: 100.0 # 前景像素权重 ⭐ 核心参数！
+        background_weight: 0.5  # 背景像素权重
+        threshold: 0.01          # 前景阈值
+        dice_smooth: 1.0e-5     # Dice平滑项
+  
+  # Checkpoint配置
+  checkpoints:
+    output_dir: "outputs/vq_ldm/vqvae_checkpoints"
+    resume_from: null  # 恢复训练的checkpoint路径，null表示从头训练
+  
+  # 日志配置
+  logging:
+    log_dir: "outputs/vq_ldm/vqvae_logs"
+    log_interval: 10  # 每N步记录一次训练日志
+    visualize_interval: 2  # 每N个epoch可视化一次
+    num_visualize_samples: 4  # 可视化的样本数量
+
+# ==================== Diffusion配置 ====================
+# ⚠️ 重要：Diffusion UNet的下采样次数必须确保潜在空间维度能被整除！
+# VQVAE输出潜在空间: 12x12x6 (embedding_dim=32)
+# UNet配置: 2层通道 = 1次下采样 (12x12x6 -> 6x6x3)
+# 否则会出现"Sizes of tensors must match"错误
+diffusion:
+  # 模型参数
+  spatial_dims: 3
+  
+  # 输入/输出通道数（应该与VQVAE的embedding_dim一致）
+  in_channels: 32  # 等于vqvae.embedding_dim
+  out_channels: 32
+  
+  # UNet通道数（调整为2层，因为潜在空间较小）
+  # 潜在空间尺寸: 12x12x6，只需1次下采样
+  num_channels: [128, 256]
+  
+  # 注意力层级
+  attention_levels: [false, true]
+  
+  # 每个注意力层的head通道数
+  num_head_channels: [0, 64]
+  
+  # 残差块数量
+  num_res_blocks: 2
+  
+  # 调度器配置
+  scheduler:
+    num_train_timesteps: 1000
+    schedule: "linear_beta"  # "linear_beta" 或 "scaled_linear_beta"
+    beta_start: 0.0015
+    beta_end: 0.0195
+  
+  # 训练配置
+  training:
+    n_epochs: 500
+    learning_rate: 1.0e-4
+    batch_size: 2  # 可以使用比VQVAE训练更大的batch_size，因为潜在空间更小
+    val_interval: 10
+    save_interval: 25
+    
+    # 快速开发模式
+    fast_dev_run: true
+    fast_dev_run_batches: 2
+  
+  # Checkpoint配置
+  checkpoints:
+    output_dir: "outputs/vq_ldm/diffusion_checkpoints"
+    
+    # VQVAE checkpoint路径（必须先训练VQVAE）
+    vqvae_path: "outputs/vq_ldm/vqvae_checkpoints/best_model.pt"
+    
+    resume_from: null  # 恢复训练的checkpoint路径
+  
+  # 日志配置
+  logging:
+    log_dir: "outputs/vq_ldm/diffusion_logs"
+    log_interval: 10
+    visualize_interval: 5  # 每N个epoch可视化一次
+    num_visualize_samples: 4
+    num_inference_steps: 1000  # 可视化时的推理步数
+
+# ==================== 说明 ====================
+# 
+# VQ-LDM训练流程：
+# 
+# 阶段1: 训练VQVAE
+#   python monai_diffusion/3d_vq_ldm/train_vqvae.py --config monai_diffusion/config/vq_ldm_config_local.yaml
+# 
+# 阶段2: 训练Diffusion Model（在VQVAE的潜在空间上）
+#   python monai_diffusion/3d_vq_ldm/train_diffusion.py --config monai_diffusion/config/vq_ldm_config_local.yaml
+# 
+# 关键参数说明：
+# 
+# VQVAE:
+# - num_embeddings: Codebook大小，越大表示能力越强，但训练越慢
+# - embedding_dim: 嵌入维度，通常16-64
+# - num_channels: 编码器/解码器的通道数，越大模型容量越大
+# 
+# Diffusion:
+# - in_channels/out_channels: 必须等于vqvae.embedding_dim
+# - num_train_timesteps: 扩散步数，通常1000
+# - num_channels: ⚠️ UNet下采样次数必须确保潜在空间所有维度能被2的N次方整除！
+#   计算公式：下采样次数 = len(num_channels) - 1
+#   例如：潜在空间12x12x6，num_channels=[128,256] -> 1次下采样 -> 6x6x3 ✓
+#   错误示例：潜在空间12x12x6，num_channels=[64,128,256] -> 2次下采样 -> W维度6->3->1.5 ✗
+# 
+# 损失函数选择指南：
+# 
+# 1. L1/MSE损失（reconstruction_loss_type: "l1" 或 "mse"）
+#    - 适用于：均衡的体素数据
+#    - 优点：简单，训练稳定
+#    - 缺点：对稀疏前景（如微管）容易预测全黑
+# 
+# 2. 加权重建损失（reconstruction_loss_type: "weighted"）
+#    - 适用于：稀疏前景数据
+#    - 优点：通过提高前景权重强制模型关注前景
+#    - 建议：foreground_weight设置为10-100
+# 
+# 3. Dice损失（reconstruction_loss_type: "dice"）
+#    - 适用于：分割任务，关注前景区域重叠度
+#    - 优点：对类别不平衡鲁棒
+#    - 缺点：可能丢失细节
+# 
+# 4. 组合损失（reconstruction_loss_type: "combined"）⭐推荐
+#    - 适用于：稀疏前景数据（如微管）
+#    - 优点：结合Dice Loss和加权重建损失的优势
+#    - 建议参数：
+#      - foreground_weight: 100.0（关键！）
+#      - background_weight: 0.5
+#      - threshold: 0.05
+#      - dice_weight: 0.5
+#      - recon_weight: 1.0
+# 
+# 显存优化建议：
+# 1. 减小patch_size（如从64降到32或48）
+# 2. 减小batch_size
+# 3. 减小num_channels
+# 4. 启用mixed_precision
+# 5. 预先resize大体素（voxel_resize参数）
+

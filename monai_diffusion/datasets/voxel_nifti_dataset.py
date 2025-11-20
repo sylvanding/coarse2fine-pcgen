@@ -278,10 +278,9 @@ class VoxelNiftiDataset:
                 
             # 随机裁剪
             transform_list.append(
-                transforms.RandSpatialCropd(
+                transforms.CenterSpatialCropd(
                     keys=["image"],
                     roi_size=self.target_voxel_size,
-                    random_size=False
                 )
             )
         else:
@@ -415,9 +414,11 @@ def create_train_val_dataloaders(
     augmentation_config = data_config.get('augmentation', {})
     augmentation_enabled = augmentation_config.get('enabled', False)
     
-    # 获取batch_size（从autoencoder或diffusion配置中）
+    # 获取batch_size（从vqvae、autoencoder或diffusion配置中）
     if batch_size is None:
-        if 'autoencoder' in config and 'training' in config['autoencoder']:
+        if 'vqvae' in config and 'training' in config['vqvae']:
+            batch_size = config['vqvae']['training']['batch_size']
+        elif 'autoencoder' in config and 'training' in config['autoencoder']:
             batch_size = config['autoencoder']['training']['batch_size']
         elif 'diffusion' in config and 'training' in config['diffusion']:
             batch_size = config['diffusion']['training']['batch_size']
