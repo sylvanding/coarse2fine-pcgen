@@ -1,0 +1,188 @@
+# 条件3D扩散模型配置文件
+# 
+# 使用2D投影图像作为条件来指导3D体素的生成
+# 基于MONAI Generative Models的3D Diffusion Model
+
+# ==================== 全局设置 ====================
+seed: 42
+
+device:
+  use_cuda: true
+  gpu_id: 0
+  mixed_precision: true
+
+# ==================== 数据配置 ====================
+data:
+  # 训练和验证数据路径
+  train_data_dir: "/repos/datasets/batch_simulation_microtubule_20251017_2048_nifti/train"
+  val_data_dir: "/repos/datasets/batch_simulation_microtubule_20251017_2048_nifti/val"
+  
+  # 体素分辨率（训练时的目标分辨率）
+  # 可以是单个整数（各向同性）或列表[X, Y, Z]（各向异性）
+  # 例如: 64 或 [64, 64, 32] 或 [256, 256, 64]
+  # 注意: 分辨率越大，显存占用越高，建议配合混合精度训练和梯度累积使用
+  voxel_size: [96, 96, 48]  # [X, Y, Z]
+  
+  # 预处理resize分辨率（在裁剪前先resize到此分辨率）
+  # null表示不进行预resize，直接使用原始分辨率进行后续处理
+  # 如果设置了值，则会在Spacing后先resize到此分辨率，再进行裁剪
+  # 可以是单个整数（各向同性）或列表[X, Y, Z]（各向异性）
+  # 例如: 128 或 [128, 128, 64] 或 null
+  voxel_resize: [128, 128, 64]  # 预处理resize，null表示不进行预resize
+  
+  # 数据加载设置
+  cache_rate: 0.2  # 缓存比例，0表示不缓存，1表示全部缓存
+  num_workers: 4
+  pin_memory: false
+  max_data_size_for_train: 4
+  max_data_size_for_val: 4
+  
+  # 数据增强
+  augmentation:
+    enabled: true
+    use_patch_based: false  # ⭐ 启用Patch-Based训练
+    use_center_crop_for_val: true  # 验证时使用中心裁剪
+    invert_intensity: false  # 是否对图片亮度进行反转（将最小亮度变成最大，最大亮度变成最小）
+    # random_flip_prob: 0.5
+    # random_rotate_prob: 0.5
+
+# ==================== 条件扩散配置 ====================
+diffusion:
+  # 模型参数
+  spatial_dims: 3
+  
+  # 输入/输出通道数
+  in_channels: 1  # 3D体素输入通道
+  out_channels: 1  # 3D体素输出通道
+  
+  # 条件参数
+  condition_channels: 1  # 2D条件图像通道数
+  condition_embed_dim: 8  # 条件嵌入维度
+  projection_axis: 2  # 投影轴（0=x, 1=y, 2=z）
+  
+  # U-Net通道数
+  num_channels: [16, 32, 64]
+  
+  # 注意力层级
+  attention_levels: [false, false, false]
+  
+  # 每个注意力层的head通道数
+  num_head_channels: [0, 0, 16]
+  
+  # 残差块数量
+  num_res_blocks: 2
+  
+  # 调度器配置
+  scheduler:
+    num_train_timesteps: 1000
+    schedule: "linear_beta"  # "linear_beta" 或 "scaled_linear_beta"
+    beta_start: 0.0005
+    beta_end: 0.0195
+  
+  # 训练配置
+  training:
+    n_epochs: 400
+    learning_rate: 1.0e-4
+    batch_size: 1  # 根据显存调整
+    val_interval: 10
+    save_interval: 25
+    
+    # 快速开发模式（用于测试，只运行几个batch）
+    fast_dev_run: false
+    fast_dev_run_batches: 1
+  
+  # Checkpoint配置
+  checkpoints:
+    output_dir: "outputs/conditional_diffusion/checkpoints"
+    resume_from: null  # 恢复训练的checkpoint路径
+  
+  # 日志配置
+  logging:
+    log_dir: "outputs/conditional_diffusion/logs"
+    log_interval: 10  # 每N步记录一次训练日志
+    visualize_interval: 1  # 每N个epoch可视化一次
+    num_visualize_samples: 2  # 可视化的样本数量
+    num_inference_steps: 1000  # 可视化时的推理步数
+
+# ==================== 说明 ====================
+# 
+# 条件3D扩散模型训练流程：
+# 
+# 1. 训练模型：
+#   python monai_diffusion/3d_diffusion/train_conditional_diffusion.py \
+#     --config monai_diffusion/config/conditional_diffusion_config.yaml
+# 
+# 2. 生成样本：
+#   python monai_diffusion/3d_diffusion/generate_conditional_samples.py \
+#     --config monai_diffusion/config/conditional_diffusion_config.yaml \
+#     --checkpoint outputs/conditional_diffusion/checkpoints/best_model.pt \
+#     --condition_image path/to/2d_image.png \
+#     --output outputs/conditional_diffusion/samples/
+# 
+# 关键参数说明：
+# 
+# 数据配置:
+# - voxel_size: 3D体素的目标分辨率，可以是各向异性的
+# - voxel_resize: 预处理时的resize分辨率，用于减少内存占用
+# - augmentation: 数据增强配置，支持翻转、旋转等
+# 
+# 模型配置:
+# - condition_channels: 2D条件图像的通道数（通常为1）
+# - condition_embed_dim: 条件嵌入的维度（影响条件信息的表达能力）
+# - projection_axis: 生成2D投影的轴（0=x, 1=y, 2=z）
+# - num_channels: U-Net各层的通道数，越大模型容量越大
+# - attention_levels: 哪些层使用注意力机制
+# 
+# 调度器配置:
+# - num_train_timesteps: 扩散步数，通常1000
+# - schedule: 噪声调度方式
+#   - "linear_beta": 线性调度（DDPM原始）
+#   - "scaled_linear_beta": 缩放线性调度（LDM推荐）
+# - beta_start/beta_end: 噪声强度的起止值
+# 
+# 训练配置:
+# - learning_rate: 学习率，建议5e-5（较小的学习率更稳定）
+# - batch_size: 批次大小，根据显存调整
+# - val_interval: 验证间隔
+# - save_interval: 保存间隔
+# - fast_dev_run: 快速开发模式，用于测试代码
+# 
+# 条件生成的工作原理:
+# 
+# 1. 数据加载:
+#    - 加载3D体素数据 (H, W, D)
+#    - 生成2D投影: 沿z轴累加 -> (H, W)
+#    - 归一化投影图像
+# 
+# 2. 训练阶段:
+#    - 输入: 噪声3D体素 + 2D条件图像
+#    - 2D条件图像通过编码器提取特征
+#    - 条件特征与时间嵌入融合
+#    - U-Net预测噪声
+# 
+# 3. 生成阶段:
+#    - 提供2D条件图像
+#    - 从随机噪声开始迭代去噪
+#    - 每一步都使用条件信息指导
+#    - 最终得到符合条件的3D体素
+# 
+# 显存优化建议:
+# 1. 减小voxel_size（如从[96,96,48]降到[64,64,32]）
+# 2. 减小batch_size
+# 3. 减小num_channels
+# 4. 启用mixed_precision
+# 5. 使用voxel_resize预先缩小数据
+# 6. 减小condition_embed_dim
+# 
+# 训练技巧:
+# 1. 先用小分辨率快速迭代验证效果
+# 2. 使用fast_dev_run模式测试代码
+# 3. 观察TensorBoard中的可视化结果
+# 4. 调整beta_start/beta_end以控制噪声强度
+# 5. 如果生成结果模糊，尝试增加num_inference_steps
+# 
+# 与标准扩散模型的区别:
+# - 标准扩散模型: 无条件生成，随机性强
+# - 条件扩散模型: 基于2D条件生成3D，可控性强
+# - 适用场景: 从2D显微图像重建3D结构
+
