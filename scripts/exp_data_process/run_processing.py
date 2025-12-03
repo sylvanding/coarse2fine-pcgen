@@ -24,7 +24,7 @@ sys.path.insert(0, str(project_root))
 
 # 尝试导入配置文件
 try:
-    from scripts.exp_data_process import config_mt as config
+    from scripts.exp_data_process import config_tissue as config
 
     CONFIG_LOADED = True
 except ImportError:
@@ -76,6 +76,24 @@ def run_with_config():
 
     logger = logging.getLogger(__name__)
 
+    # 获取递归设置，默认为True
+    recursive = getattr(config, 'RECURSIVE', True)
+    
+    # 获取数据增强设置，默认为默认值
+    enable_rotation = getattr(config, 'ENABLE_ROTATION', True)
+    rotation_angle_range = getattr(config, 'ROTATION_ANGLE_RANGE', None)
+    enable_z_flip = getattr(config, 'ENABLE_Z_FLIP', False)
+    z_flip_probability = getattr(config, 'Z_FLIP_PROBABILITY', 0.5)
+    use_center_bias = getattr(config, 'USE_CENTER_BIAS', False)
+    center_bias_factor = getattr(config, 'CENTER_BIAS_FACTOR', 1.0)
+    
+    # 获取上采样设置
+    upsample_method = getattr(config, 'UPSAMPLE_METHOD', 'duplicate')
+    upsample_k = getattr(config, 'UPSAMPLE_K', 3)
+    
+    # 获取区域尺寸检查设置
+    ignore_insufficient_region_size = getattr(config, 'IGNORE_INSUFFICIENT_REGION_SIZE', False)
+
     # 显示配置信息
     logger.info("=" * 70)
     logger.info("点云数据处理 - 使用配置文件运行")
@@ -83,6 +101,7 @@ def run_with_config():
     logger.info("")
     logger.info("配置参数:")
     logger.info(f"  输入目录: {config.INPUT_DIR}")
+    logger.info(f"  递归查找: {recursive}")
     logger.info(f"  输出文件: {config.OUTPUT_H5}")
     logger.info(f"  样本数量: {config.NUM_SAMPLES}")
     logger.info(f"  区域大小: {config.REGION_SIZE} nm")
@@ -91,6 +110,13 @@ def run_with_config():
     logger.info(f"  最大尝试: {config.MAX_ATTEMPTS}")
     logger.info(f"  坐标精度: {config.DECIMALS} 位小数")
     logger.info(f"  随机种子: {config.RANDOM_SEED}")
+    logger.info(f"  随机旋转: {enable_rotation} (范围: {rotation_angle_range})")
+    logger.info(f"  Z轴翻转: {enable_z_flip} (概率: {z_flip_probability})")
+    logger.info(f"  中心偏置: {use_center_bias} (因子: {center_bias_factor})")
+    logger.info(f"  上采样方法: {upsample_method}")
+    if upsample_method == 'interpolate':
+        logger.info(f"  插值邻居数: {upsample_k}")
+    logger.info(f"  忽略区域尺寸不足: {ignore_insufficient_region_size}")
     logger.info("")
 
     try:
@@ -98,7 +124,7 @@ def run_with_config():
         logger.info("=" * 70)
         logger.info("步骤 1: 查找CSV文件")
         logger.info("=" * 70)
-        csv_files = find_all_csv_files(config.INPUT_DIR)
+        csv_files = find_all_csv_files(config.INPUT_DIR, recursive=recursive)
 
         # 步骤 2: 生成样本
         logger.info("")
@@ -114,6 +140,15 @@ def run_with_config():
             max_attempts=config.MAX_ATTEMPTS,
             decimals=config.DECIMALS,
             random_seed=config.RANDOM_SEED,
+            enable_rotation=enable_rotation,
+            rotation_angle_range=rotation_angle_range,
+            enable_z_flip=enable_z_flip,
+            z_flip_probability=z_flip_probability,
+            use_center_bias=use_center_bias,
+            center_bias_factor=center_bias_factor,
+            upsample_method=upsample_method,
+            upsample_k=upsample_k,
+            ignore_insufficient_region_size=ignore_insufficient_region_size,
         )
 
         # 步骤 3: 保存到H5文件
@@ -155,6 +190,7 @@ def run_with_args(args):
     logger.info("")
     logger.info("参数:")
     logger.info(f"  输入目录: {args.input_dir}")
+    logger.info(f"  递归查找: {not args.no_recursive}")
     logger.info(f"  输出文件: {args.output}")
     logger.info(f"  样本数量: {args.num_samples}")
     logger.info(f"  区域大小: ({args.region_x}, {args.region_y}, {args.region_z}) nm")
@@ -170,7 +206,7 @@ def run_with_args(args):
         logger.info("=" * 70)
         logger.info("步骤 1: 查找CSV文件")
         logger.info("=" * 70)
-        csv_files = find_all_csv_files(args.input_dir)
+        csv_files = find_all_csv_files(args.input_dir, recursive=not args.no_recursive)
 
         # 步骤 2: 生成样本
         logger.info("")
@@ -234,6 +270,12 @@ def main():
     )
 
     parser.add_argument("--input-dir", "-i", type=str, help="输入CSV文件目录")
+    
+    parser.add_argument(
+        "--no-recursive", 
+        action="store_true", 
+        help="不递归查找子目录，只在输入目录当前层级查找 (默认: 递归查找)"
+    )
 
     parser.add_argument("--output", "-o", type=str, help="输出H5文件路径")
 

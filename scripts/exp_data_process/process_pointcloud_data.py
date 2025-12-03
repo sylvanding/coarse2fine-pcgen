@@ -33,6 +33,7 @@ import numpy as np
 import pandas as pd
 import h5py
 from tqdm import tqdm
+from scipy.spatial import cKDTree
 
 # 配置日志
 logging.basicConfig(
@@ -42,12 +43,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def find_all_csv_files(root_dir: str) -> List[Path]:
+def find_all_csv_files(root_dir: str, recursive: bool = True) -> List[Path]:
     """
-    递归查找目录下所有必要列存在的CSV文件
+    查找目录下所有必要列存在的CSV文件，支持递归或非递归查找
     
     Args:
         root_dir (str): 根目录路径
+        recursive (bool): 是否递归查找子目录，默认为True
         
     Returns:
         List[Path]: 必需列存在的CSV文件路径列表
@@ -63,11 +65,15 @@ def find_all_csv_files(root_dir: str) -> List[Path]:
     if not root_path.is_dir():
         raise ValueError(f"路径不是目录: {root_dir}")
     
-    # 递归查找所有CSV文件
-    csv_files = list(root_path.rglob("*.csv"))
+    # 查找所有CSV文件
+    if recursive:
+        csv_files = list(root_path.rglob("*.csv"))
+    else:
+        csv_files = list(root_path.glob("*.csv"))
     
     if len(csv_files) == 0:
-        raise ValueError(f"在 {root_dir} 及其子目录中未找到必需列存在的CSV文件")
+        search_type = "递归" if recursive else "在当前目录"
+        raise ValueError(f"{search_type}在 {root_dir} 中未找到必需列存在的CSV文件")
     
     # 只保留必需的列存在的csv文件
     required_columns = ["x [nm]", "y [nm]", "z [nm]"]
@@ -162,11 +168,30 @@ def rotate_pointcloud_z(points: np.ndarray, angle: Optional[float] = None) -> np
     return rotated_points
 
 
+def flip_pointcloud_z(points: np.ndarray) -> np.ndarray:
+    """
+    沿Z轴翻转点云（将Z坐标取反）
+    
+    Args:
+        points (np.ndarray): 形状为(N, 3)的点云数据
+        
+    Returns:
+        np.ndarray: 翻转后的点云
+    """
+    flipped_points = points.copy()
+    flipped_points[:, 2] = -flipped_points[:, 2]
+    flipped_points[:, 2] = flipped_points[:, 2] - np.min(flipped_points[:, 2])
+    return flipped_points
+
+
 def extract_random_region(
     points: np.ndarray,
     region_size: Tuple[float, float, float],
     min_points: int = 100,
-    max_attempts: int = 10
+    max_attempts: int = 10,
+    use_center_bias: bool = False,
+    center_bias_factor: float = 1.0,
+    ignore_insufficient_region_size: bool = False
 ) -> Optional[np.ndarray]:
     """
     从点云中随机提取一个指定大小的区域
@@ -176,6 +201,9 @@ def extract_random_region(
         region_size (Tuple[float, float, float]): 区域大小(x_size, y_size, z_size)，单位nm
         min_points (int): 区域内最少点数要求
         max_attempts (int): 最大尝试次数
+        use_center_bias (bool): 是否使用中心偏置
+        center_bias_factor (float): 中心偏置因子 (0.0-1.0)，1.0表示只从中心提取
+        ignore_insufficient_region_size (bool): 是否忽略区域尺寸不足的情况
         
     Returns:
         Optional[np.ndarray]: 提取的点云区域，如果失败返回None
@@ -195,17 +223,53 @@ def extract_random_region(
     if (point_cloud_size[0] < x_size or 
         point_cloud_size[1] < y_size or 
         point_cloud_size[2] < z_size):
-        logger.debug(
-            f"点云尺寸 {point_cloud_size} 小于所需区域 {region_size}"
-        )
-        return None
+        if not ignore_insufficient_region_size:
+            logger.debug(
+                f"点云尺寸 {point_cloud_size} 小于所需区域 {region_size}"
+            )
+            return None
+        else:
+            # 使用点云的实际尺寸
+            x_size = min(x_size, point_cloud_size[0])
+            y_size = min(y_size, point_cloud_size[1])
+            z_size = min(z_size, point_cloud_size[2])
+            logger.debug(
+                f"点云尺寸 {point_cloud_size} 小于所需区域 {region_size}，"
+                f"使用实际尺寸 ({x_size}, {y_size}, {z_size})"
+            )
     
     # 尝试随机提取区域
     for attempt in range(max_attempts):
         # 随机选择区域的起始点
-        x_start = np.random.uniform(min_coords[0], max_coords[0] - x_size)
-        y_start = np.random.uniform(min_coords[1], max_coords[1] - y_size)
-        z_start = np.random.uniform(min_coords[2], max_coords[2] - z_size)
+        if use_center_bias:
+            # 计算每个维度的有效起始范围
+            x_valid_min, x_valid_max = min_coords[0], max_coords[0] - x_size
+            y_valid_min, y_valid_max = min_coords[1], max_coords[1] - y_size
+            z_valid_min, z_valid_max = min_coords[2], max_coords[2] - z_size
+
+            # 计算范围长度
+            x_len = x_valid_max - x_valid_min
+            y_len = y_valid_max - y_valid_min
+            z_len = z_valid_max - z_valid_min
+
+            # 根据bias factor缩效范围
+            # factor=1.0 -> 范围长度为0 (只取中心)
+            # factor=0.0 -> 范围长度为原始长度
+            x_range = x_len * (1.0 - center_bias_factor)
+            y_range = y_len * (1.0 - center_bias_factor)
+            z_range = z_len * (1.0 - center_bias_factor)
+
+            x_center = (x_valid_min + x_valid_max) / 2
+            y_center = (y_valid_min + y_valid_max) / 2
+            z_center = (z_valid_min + z_valid_max) / 2
+
+            x_start = np.random.uniform(x_center - x_range/2, x_center + x_range/2)
+            y_start = np.random.uniform(y_center - y_range/2, y_center + y_range/2)
+            z_start = np.random.uniform(z_center - z_range/2, z_center + z_range/2)
+        else:
+            x_start = np.random.uniform(min_coords[0], max_coords[0] - x_size)
+            y_start = np.random.uniform(min_coords[1], max_coords[1] - y_size)
+            z_start = np.random.uniform(min_coords[2], max_coords[2] - z_size)
         
         # 定义区域边界
         x_end = x_start + x_size
@@ -262,16 +326,76 @@ def round_coordinates(points: np.ndarray, decimals: int = 2) -> np.ndarray:
     return np.round(points, decimals=decimals)
 
 
-def adjust_point_count(points: np.ndarray, target_count: int) -> np.ndarray:
+def interpolate_points(points: np.ndarray, target_count: int, k: int = 3) -> np.ndarray:
+    """
+    通过在最近邻之间插值来增加点数
+    
+    Args:
+        points (np.ndarray): 输入点云 (N, 3)
+        target_count (int): 目标点数
+        k (int): 插值时考虑的邻居数量
+        
+    Returns:
+        np.ndarray: 增加点数后的点云
+    """
+    current_count = len(points)
+    if current_count >= target_count:
+        return points
+        
+    needed_points = target_count - current_count
+    
+    # 构建KDTree
+    tree = cKDTree(points)
+    
+    # 随机选择源点索引（允许重复）
+    source_indices = np.random.choice(current_count, size=needed_points, replace=True)
+    source_points = points[source_indices]
+    
+    # 查询k个最近邻（k+1是因为包含自身）
+    # k必须小于等于current_count - 1
+    actual_k = min(k, current_count - 1)
+    if actual_k < 1:
+        # 如果点数太少无法插值，退化为复制
+        logger.warning("点数太少无法插值，退化为随机复制")
+        additional_points = points[np.random.choice(current_count, size=needed_points, replace=True)]
+        return np.vstack([points, additional_points])
+        
+    distances, indices = tree.query(source_points, k=actual_k + 1)
+    
+    # indices shape: (needed_points, actual_k+1)
+    # 第一列是点自身，我们在剩下的列中随机选一个
+    neighbor_indices_choice = np.random.randint(1, actual_k + 1, size=needed_points)
+    
+    # 获取选中的邻居索引
+    # indices[i, neighbor_indices_choice[i]]
+    chosen_neighbor_indices = indices[np.arange(needed_points), neighbor_indices_choice]
+    
+    chosen_neighbor_points = points[chosen_neighbor_indices]
+    
+    # 在源点和邻居之间随机插值
+    alphas = np.random.uniform(0, 1, size=(needed_points, 1))
+    new_points = source_points + alphas * (chosen_neighbor_points - source_points)
+    
+    return np.vstack([points, new_points])
+
+
+def adjust_point_count(
+    points: np.ndarray, 
+    target_count: int, 
+    method: str = 'duplicate',
+    k: int = 3
+) -> np.ndarray:
     """
     调整点云的点数到目标数量
     
-    如果点数少于目标数量，随机复制一些点；
+    如果点数少于目标数量，随机复制一些点或插值；
     如果点数多于目标数量，随机删除一些点。
     
     Args:
         points (np.ndarray): 输入点云，形状为(N, 3)
         target_count (int): 目标点数
+        method (str): 当点数不足时的处理方法，'duplicate' 或 'interpolate'
+        k (int): 插值时使用的邻居数量
         
     Returns:
         np.ndarray: 调整后的点云，形状为(target_count, 3)
@@ -281,20 +405,24 @@ def adjust_point_count(points: np.ndarray, target_count: int) -> np.ndarray:
     if current_count == target_count:
         return points.copy()
     elif current_count < target_count:
-        # 点数不足，需要复制一些点
-        # 计算需要复制的点数
-        points_to_add = target_count - current_count
-        
-        # 随机选择要复制的点的索引
-        indices_to_copy = np.random.choice(current_count, size=points_to_add, replace=True)
-        
-        # 复制选中的点
-        additional_points = points[indices_to_copy]
-        
-        # 合并原始点和复制的点
-        adjusted_points = np.vstack([points, additional_points])
-        
-        return adjusted_points
+        # 点数不足，需要增加点
+        if method == 'interpolate':
+            return interpolate_points(points, target_count, k=k)
+        else:
+            # 默认为 duplicate
+            # 计算需要复制的点数
+            points_to_add = target_count - current_count
+            
+            # 随机选择要复制的点的索引
+            indices_to_copy = np.random.choice(current_count, size=points_to_add, replace=True)
+            
+            # 复制选中的点
+            additional_points = points[indices_to_copy]
+            
+            # 合并原始点和复制的点
+            adjusted_points = np.vstack([points, additional_points])
+            
+            return adjusted_points
     else:
         # 点数过多，需要删除一些点
         # 随机选择要保留的点的索引
@@ -312,7 +440,16 @@ def generate_samples(
     min_points: int = 100,
     max_attempts: int = 10,
     decimals: int = 2,
-    random_seed: Optional[int] = None
+    random_seed: Optional[int] = None,
+    enable_rotation: bool = True,
+    rotation_angle_range: Optional[Tuple[float, float]] = None,
+    enable_z_flip: bool = False,
+    z_flip_probability: float = 0.5,
+    use_center_bias: bool = False,
+    center_bias_factor: float = 1.0,
+    upsample_method: str = 'duplicate',
+    upsample_k: int = 3,
+    ignore_insufficient_region_size: bool = False
 ) -> List[np.ndarray]:
     """
     从CSV文件列表中生成指定数量的点云样本
@@ -320,11 +457,12 @@ def generate_samples(
     处理流程：
         1. 随机选择CSV文件
         2. 加载点云
-        3. 随机旋转（绕Z轴）
-        4. 随机提取区域
-        5. 平移到原点
-        6. 精确坐标
-        7. 调整点数到目标数量
+        3. 随机旋转（绕Z轴，可选）
+        4. 随机Z轴翻转（可选）
+        5. 随机提取区域（可选中心偏置）
+        6. 平移到原点
+        7. 精确坐标
+        8. 调整点数到目标数量
     
     Args:
         csv_files (List[Path]): CSV文件路径列表
@@ -335,6 +473,15 @@ def generate_samples(
         max_attempts (int): 每个CSV文件的最大尝试次数
         decimals (int): 坐标保留的小数位数
         random_seed (Optional[int]): 随机种子，用于可重复性
+        enable_rotation (bool): 是否启用随机旋转
+        rotation_angle_range (Optional[Tuple[float, float]]): 旋转角度范围，None表示[0, 2pi]
+        enable_z_flip (bool): 是否启用Z轴翻转
+        z_flip_probability (float): Z轴翻转概率（0.0-1.0）
+        use_center_bias (bool): 是否使用中心偏置提取
+        center_bias_factor (float): 中心偏置因子
+        upsample_method (str): 点数不足时的上采样方法
+        upsample_k (int): 插值时的邻居数量
+        ignore_insufficient_region_size (bool): 是否忽略区域尺寸不足的情况
         
     Returns:
         List[np.ndarray]: 生成的点云样本列表，每个样本都有target_points个点
@@ -375,14 +522,27 @@ def generate_samples(
                 continue
             
             # 随机旋转
-            rotated_points = rotate_pointcloud_z(points)
+            if enable_rotation:
+                angle = None
+                if rotation_angle_range is not None:
+                    angle = np.random.uniform(rotation_angle_range[0], rotation_angle_range[1])
+                rotated_points = rotate_pointcloud_z(points, angle=angle)
+            else:
+                rotated_points = points
+            
+            # 随机Z轴翻转
+            if enable_z_flip and np.random.random() < z_flip_probability:
+                rotated_points = flip_pointcloud_z(rotated_points)
             
             # 提取区域
             region = extract_random_region(
                 rotated_points,
                 region_size,
                 min_points,
-                max_attempts
+                max_attempts,
+                use_center_bias=use_center_bias,
+                center_bias_factor=center_bias_factor,
+                ignore_insufficient_region_size=ignore_insufficient_region_size
             )
             
             if region is None:
@@ -397,7 +557,12 @@ def generate_samples(
             final_points = round_coordinates(translated_region, decimals)
             
             # 调整点数到目标数量
-            adjusted_points = adjust_point_count(final_points, target_points)
+            adjusted_points = adjust_point_count(
+                final_points, 
+                target_points,
+                method=upsample_method,
+                k=upsample_k
+            )
             
             # 添加到样本列表
             samples.append(adjusted_points)
@@ -418,7 +583,16 @@ def generate_samples_with_source(
     min_points: int = 100,
     max_attempts: int = 10,
     decimals: int = 2,
-    random_seed: Optional[int] = None
+    random_seed: Optional[int] = None,
+    enable_rotation: bool = True,
+    rotation_angle_range: Optional[Tuple[float, float]] = None,
+    enable_z_flip: bool = False,
+    z_flip_probability: float = 0.5,
+    use_center_bias: bool = False,
+    center_bias_factor: float = 1.0,
+    upsample_method: str = 'duplicate',
+    upsample_k: int = 3,
+    ignore_insufficient_region_size: bool = False
 ) -> Tuple[List[np.ndarray], List[Path]]:
     """
     从CSV文件列表中生成指定数量的点云样本，并记录每个样本的来源文件
@@ -426,11 +600,12 @@ def generate_samples_with_source(
     处理流程：
         1. 随机选择CSV文件
         2. 加载点云
-        3. 随机旋转（绕Z轴）
-        4. 随机提取区域
-        5. 平移到原点
-        6. 精确坐标
-        7. 调整点数到目标数量
+        3. 随机旋转（绕Z轴，可选）
+        4. 随机Z轴翻转（可选）
+        5. 随机提取区域（可选中心偏置）
+        6. 平移到原点
+        7. 精确坐标
+        8. 调整点数到目标数量
     
     Args:
         csv_files (List[Path]): CSV文件路径列表
@@ -441,6 +616,15 @@ def generate_samples_with_source(
         max_attempts (int): 每个CSV文件的最大尝试次数
         decimals (int): 坐标保留的小数位数
         random_seed (Optional[int]): 随机种子，用于可重复性
+        enable_rotation (bool): 是否启用随机旋转
+        rotation_angle_range (Optional[Tuple[float, float]]): 旋转角度范围，None表示[0, 2pi]
+        enable_z_flip (bool): 是否启用Z轴翻转
+        z_flip_probability (float): Z轴翻转概率（0.0-1.0）
+        use_center_bias (bool): 是否使用中心偏置提取
+        center_bias_factor (float): 中心偏置因子
+        upsample_method (str): 点数不足时的上采样方法
+        upsample_k (int): 插值时的邻居数量
+        ignore_insufficient_region_size (bool): 是否忽略区域尺寸不足的情况
         
     Returns:
         Tuple[List[np.ndarray], List[Path]]: 
@@ -484,14 +668,27 @@ def generate_samples_with_source(
                 continue
             
             # 随机旋转
-            rotated_points = rotate_pointcloud_z(points)
+            if enable_rotation:
+                angle = None
+                if rotation_angle_range is not None:
+                    angle = np.random.uniform(rotation_angle_range[0], rotation_angle_range[1])
+                rotated_points = rotate_pointcloud_z(points, angle=angle)
+            else:
+                rotated_points = points
+            
+            # 随机Z轴翻转
+            if enable_z_flip and np.random.random() < z_flip_probability:
+                rotated_points = flip_pointcloud_z(rotated_points)
             
             # 提取区域
             region = extract_random_region(
                 rotated_points,
                 region_size,
                 min_points,
-                max_attempts
+                max_attempts,
+                use_center_bias=use_center_bias,
+                center_bias_factor=center_bias_factor,
+                ignore_insufficient_region_size=ignore_insufficient_region_size
             )
             
             if region is None:
@@ -506,7 +703,12 @@ def generate_samples_with_source(
             final_points = round_coordinates(translated_region, decimals)
             
             # 调整点数到目标数量
-            adjusted_points = adjust_point_count(final_points, target_points)
+            adjusted_points = adjust_point_count(
+                final_points, 
+                target_points,
+                method=upsample_method,
+                k=upsample_k
+            )
             
             # 添加到样本列表和来源文件列表
             samples.append(adjusted_points)
@@ -553,7 +755,7 @@ def save_samples_to_h5(
     if not all(count == points_per_sample for count in point_counts):
         raise ValueError(f"所有样本的点数必须一致，但发现不同的点数: {set(point_counts)}")
     
-    logger.info(f"样本统计:")
+    logger.info("样本统计:")
     logger.info(f"  - 样本数量: {num_samples}")
     logger.info(f"  - 每个样本点数: {points_per_sample}")
     
