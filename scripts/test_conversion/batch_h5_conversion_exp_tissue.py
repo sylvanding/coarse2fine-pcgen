@@ -71,7 +71,7 @@ def parse_arguments():
     
     parser.add_argument(
         '--output', '-o',
-        default="/repos/datasets/exp-data-4pi-pc-mt/mt_exp_pointcloud_samples_noised_128.h5",
+        default="/repos/datasets/tissue-datasets/pointclouds-clean-check-noised.h5",
         type=str,
         help='输出H5文件路径'
     )
@@ -94,21 +94,21 @@ def parse_arguments():
     parser.add_argument(
         '--sigma',
         type=float,
-        default=1.0,
+        default=0.6,
         help='高斯方法的标准差 (默认: 1.0)'
     )
     
     parser.add_argument(
         '--data-key',
         type=str,
-        default='point_clouds',
+        default='pointclouds',
         help='H5文件中数据的键名 (默认: point_clouds)'
     )
     
     parser.add_argument(
         '--output-key',
         type=str,
-        default='point_clouds',
+        default='pointclouds',
         help='输出H5文件中数据的键名 (默认: point_clouds)'
     )
     
@@ -123,7 +123,7 @@ def parse_arguments():
         '--volume-dims',
         type=float,
         nargs=3,
-        default=[8000, 8000, 300],
+        default=[28000.0, 28000.0, 1600.0],
         help='体积尺寸 [x, y, z] (单位: nm) (默认: [20000, 20000, 2500])'
     )
     
@@ -139,14 +139,14 @@ def parse_arguments():
     parser.add_argument(
         '--sample-num-points',
         type=int,
-        default=80000,
+        default=100000,
         help='采样回点云的目标点数 (默认: 100000)'
     )
     
     parser.add_argument(
         '--sample-threshold',
         type=float,
-        default=0.0,
+        default=0.05,
         help='体素值阈值，高于此值的体素被视为包含点 (默认: 0.0)'
     )
     

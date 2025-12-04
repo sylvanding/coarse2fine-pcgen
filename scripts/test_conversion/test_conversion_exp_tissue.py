@@ -125,7 +125,7 @@ def parse_arguments():
     parser.add_argument(
         '--sigma',
         type=float,
-        default=1.0,
+        default=0.5,
         help='高斯方法的标准差 (默认: 1.5)'
     )
     
@@ -184,7 +184,7 @@ def parse_arguments():
     parser.add_argument(
         '--sample-threshold',
         type=float,
-        default=0.0,
+        default=0.05,
         help='体素值阈值，高于此值的体素被视为包含点 (默认: 0.0)'
     )
     

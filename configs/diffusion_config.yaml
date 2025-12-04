@@ -3,24 +3,29 @@
 
 # 数据配置
 data:
-  h5_file_path: "/repos/datasets/batch_simulation_microtubule_20251017_2048.h5"
-  data_key: "point_clouds"
+  # 数据源配置
+  h5_file_path: "/repos/datasets/tissue-datasets/pointclouds-clean-check.h5"
+  data_key: "pointclouds"
   train_ratio: 0.95
   
-  # 体素化参数
-  voxel_size: 256  # 体素网格分辨率 (可选: 32, 64, 128, 256), 128
+  # 预渲染配置 (可大幅加速训练)
+  use_prerendered: true  # 是否使用预渲染体素数据
+  prerendered_dir: "/repos/datasets/prerendered_voxels_128"  # 预渲染数据目录
+  
+  # 体素化参数 (仅在use_prerendered=false时生效)
+  voxel_size: 128  # 体素网格分辨率 (可选: 32, 64, 128, 256), 128
   voxelization_method: "gaussian"  # 选项: "occupancy", "density", "gaussian"
-  sigma: 1.0  # 高斯体素化的标准差
+  sigma: 0.05  # 高斯体素化的标准差
   
   # 体积参数 (单位: nm)
-  volume_dims: [20000, 20000, 600]  # [x, y, z] 体积尺寸
-  padding: [0, 0, 200]  # [x, y, z] 边界填充
+  volume_dims: [28000.0, 28000.0, 1600.0]  # [x, y, z] 体积尺寸
+  padding: [0, 0, 0]  # [x, y, z] 边界填充
   
   # 数据处理
   normalize: true  # 是否归一化到[-1, 1]
   augment: true   # 训练时是否使用数据增强
-  cache_voxels: false  # 是否缓存体素数据
-  max_cache_size: 1  # 最大缓存样本数
+  cache_voxels: false  # 是否缓存体素数据 (仅动态渲染时生效)
+  max_cache_size: 32  # 最大缓存样本数 (仅动态渲染时生效)
 
 # 模型配置
 model:
@@ -29,7 +34,7 @@ model:
   num_res_blocks: 2    # 每层的残差块数量
   attention_resolutions: [16, 8]  # 使用注意力的分辨率层级
   channel_mult: [1, 2, 4, 8]     # 各层通道倍数
-  dropout: 0.0         # Dropout率
+  dropout: 0.1         # Dropout率
   use_attention: true  # 是否使用自注意力机制
   
   # 扩散过程参数
@@ -40,13 +45,13 @@ model:
   
   # 高级选项
   compile_model: false  # 是否编译模型 (PyTorch 2.0+)
-  use_ema: true        # 是否使用指数移动平均
-  ema_decay: 0.99    # EMA衰减率
+  use_ema: false        # 是否使用指数移动平均
+  ema_decay: 0.9999    # EMA衰减率
 
 # 训练配置
 training:
   # 基础训练参数
-  batch_size: 2        # 批次大小, original: 1
+  batch_size: 1        # 批次大小, original: 1
   learning_rate: 0.0001  # 学习率
   weight_decay: 0.01     # 权重衰减
   warmup_steps: 100     # 学习率预热步数, original: 1000
@@ -73,8 +78,8 @@ training:
 # 验证配置
 validation:
   # 样本生成
-  sample_interval: 5    # 每N个epoch生成一次验证样本
-  num_samples: 4         # 每次生成的样本数
+  sample_interval: 2    # 每N个epoch生成一次验证样本
+  num_samples: 1         # 每次生成的样本数
   save_tiffs: true       # 是否保存TIFF文件
   output_dir: "validation_outputs"  # 输出目录
   
@@ -117,6 +122,23 @@ logging:
   # 其他日志
   save_dir: "checkpoints"   # 检查点保存目录
   version: null             # 实验版本号 (自动生成)
+
+# 预渲染配置
+prerender:
+  # 输出设置
+  output_dir: "/repos/datasets/prerendered_voxels_128"  # 预渲染输出目录
+  
+  # 处理参数
+  max_samples: 10  # 最大处理样本数 (null表示处理所有, 设置数字可用于测试)
+  batch_size: 5    # 每个H5文件包含的体素数量 (防止文件过大)
+  
+  # 优化参数
+  threshold: 0.05   # 体素值过滤阈值 (低于此值的设为0, 可减小文件大小)
+  precision: 10      # 保留的小数位数 (减小存储空间)
+  compression: "gzip"  # H5压缩方式: "none", "gzip", "lzf"
+  
+  # 其他选项
+  overwrite: true   # 是否覆盖已存在的文件
 
 # 推理配置
 inference:

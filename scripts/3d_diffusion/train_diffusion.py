@@ -7,17 +7,14 @@
 """
 
 import argparse
-import os
 import sys
 from pathlib import Path
 import logging
-import warnings
 
 # 添加项目根目录到Python路径
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-import torch
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, EarlyStopping
 from pytorch_lightning.loggers import TensorBoardLogger
@@ -25,7 +22,11 @@ from torch.utils.data import DataLoader
 
 # 导入项目模块
 from src.models.diffusion_lightning import DiffusionLightningModule, DiffusionLightningModuleWithEMA
-from src.data.voxel_dataset import create_train_val_datasets, VoxelCollator
+from src.data.voxel_dataset import (
+    create_train_val_datasets, 
+    create_prerendered_train_val_datasets,
+    VoxelCollator
+)
 from src.utils.config_loader import load_config_with_overrides, create_default_config
 
 # 配置日志
@@ -194,20 +195,40 @@ def create_data_loaders(config: dict) -> tuple:
     
     logger.info("创建数据集...")
     
-    # 创建训练和验证数据集
-    train_dataset, val_dataset = create_train_val_datasets(
-        h5_file_path=data_config['h5_file_path'],
-        train_ratio=data_config['train_ratio'],
-        voxel_size=data_config['voxel_size'],
-        voxelization_method=data_config['voxelization_method'],
-        data_key=data_config['data_key'],
-        sigma=data_config.get('sigma', 1.0),
-        volume_dims=data_config.get('volume_dims'),
-        padding=data_config.get('padding'),
-        normalize=data_config.get('normalize', True),
-        cache_voxels=data_config.get('cache_voxels', True),
-        max_cache_size=data_config.get('max_cache_size', 1000)
-    )
+    # 检查是否使用预渲染数据
+    use_prerendered = data_config.get('use_prerendered', False)
+    
+    if use_prerendered:
+        # 使用预渲染体素数据
+        prerendered_dir = data_config.get('prerendered_dir')
+        if not prerendered_dir or not Path(prerendered_dir).exists():
+            raise ValueError(f"预渲染数据目录不存在或未指定: {prerendered_dir}")
+        
+        logger.info(f"使用预渲染数据: {prerendered_dir}")
+        
+        train_dataset, val_dataset = create_prerendered_train_val_datasets(
+            prerendered_dir=prerendered_dir,
+            train_ratio=data_config['train_ratio'],
+            normalize=data_config.get('normalize', True),
+            augment=data_config.get('augment', True)
+        )
+    else:
+        # 动态渲染点云到体素
+        logger.info("使用动态点云到体素转换")
+        
+        train_dataset, val_dataset = create_train_val_datasets(
+            h5_file_path=data_config['h5_file_path'],
+            train_ratio=data_config['train_ratio'],
+            voxel_size=data_config['voxel_size'],
+            voxelization_method=data_config['voxelization_method'],
+            data_key=data_config['data_key'],
+            sigma=data_config.get('sigma', 1.0),
+            volume_dims=data_config.get('volume_dims'),
+            padding=data_config.get('padding'),
+            normalize=data_config.get('normalize', True),
+            cache_voxels=data_config.get('cache_voxels', True),
+            max_cache_size=data_config.get('max_cache_size', 1000)
+        )
     
     # 创建数据整理器
     collator = VoxelCollator()
